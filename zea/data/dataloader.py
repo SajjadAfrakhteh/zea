@@ -1,8 +1,27 @@
-"""
-H5 dataloader for loading images from zea datasets.
+"""H5 dataloader for loading images from zea datasets.
+
+Example:
+    .. code-block:: python
+
+        from zea.data.dataloader import Dataloader
+
+        loader = Dataloader(
+            file_paths="/path/to/dataset",
+            key="data/image",
+            batch_size=16,
+            image_range=(-60, 0),
+            normalization_range=(0, 1),
+            image_size=(256, 256),
+            num_threads=16,
+        )
+
+        for batch in loader:
+            # batch is a numpy array of shape (batch_size, 256, 256, 1)
+            ...
 """
 
 import re
+import threading
 from itertools import product
 from pathlib import Path
 from typing import List, Tuple, Union
@@ -412,3 +431,481 @@ class H5Generator(Dataset):
             percentage = (count / total_samples) * 100 if total_samples else 0
             parts.append(f"  {dir_path}: {count} samples ({percentage:.1f}%)")
         print("\n".join(parts))
+
+
+class H5DataSource:
+    """Thread-safe random-access data source for HDF5 files.
+
+    Implements ``grain.RandomAccessDataSource`` protocol (``__getitem__``
+    and ``__len__``) so it can be plugged directly into a
+    ``grain.MapDataset`` pipeline.
+
+    Each worker thread gets its own ``H5FileHandleCache`` via
+    ``threading.local()`` so ``h5py`` file handles are never shared across
+    threads.
+
+    Args:
+        file_paths: Path(s) to HDF5 directory(ies) or file(s).
+        key: HDF5 dataset key, e.g. ``"data/image"``.
+        n_frames: Number of consecutive frames per sample.
+        frame_index_stride: Stride between frames.
+        frame_axis: Axis along which frames are stacked in the output.
+        insert_frame_axis: Whether to insert a new axis for frames.
+        initial_frame_axis: Source axis that stores frames in the file.
+        additional_axes_iter: Extra axes to iterate over.
+        sort_files: Sort files numerically.
+        overlapping_blocks: Allow overlapping frame blocks.
+        limit_n_samples: Cap the number of samples.
+        limit_n_frames: Cap frames loaded per file.
+        validate: Validate dataset against the zea format.
+    """
+
+    def __init__(
+        self,
+        file_paths: List[str] | str,
+        key: str = "data/image",
+        n_frames: int = 1,
+        frame_index_stride: int = 1,
+        frame_axis: int = -1,
+        insert_frame_axis: bool = True,
+        initial_frame_axis: int = 0,
+        additional_axes_iter: tuple | None = None,
+        sort_files: bool = True,
+        overlapping_blocks: bool = False,
+        limit_n_samples: int | None = None,
+        limit_n_frames: int | None = None,
+        validate: bool = True,
+        **kwargs,
+    ):
+        self.key = key
+        self.n_frames = int(n_frames)
+        self.frame_index_stride = int(frame_index_stride)
+        self.frame_axis = int(frame_axis)
+        self.insert_frame_axis = insert_frame_axis
+        self.initial_frame_axis = int(initial_frame_axis)
+        self.additional_axes_iter = list(additional_axes_iter or [])
+
+        assert self.frame_index_stride > 0, (
+            f"`frame_index_stride` must be > 0, got {self.frame_index_stride}"
+        )
+        assert self.n_frames > 0, f"`n_frames` must be > 0, got {self.n_frames}"
+
+        # Discover files and shapes (reuses Dataset machinery)
+        _dataset = Dataset(file_paths, key, validate=validate, **kwargs)
+        self.file_paths = _dataset.file_paths
+        self.file_shapes = _dataset.file_shapes
+        _dataset.close()
+
+        # Compute per-sample index table
+        self.indices = generate_h5_indices(
+            file_paths=self.file_paths,
+            file_shapes=self.file_shapes,
+            n_frames=self.n_frames,
+            frame_index_stride=self.frame_index_stride,
+            key=self.key,
+            initial_frame_axis=self.initial_frame_axis,
+            additional_axes_iter=self.additional_axes_iter,
+            sort_files=sort_files,
+            overlapping_blocks=overlapping_blocks,
+            limit_n_frames=limit_n_frames,
+        )
+
+        if limit_n_samples:
+            log.info(f"H5DataSource: Limiting to {limit_n_samples} / {len(self.indices)} samples.")
+            self.indices = self.indices[:limit_n_samples]
+
+        # Compute output shape (same logic as H5Generator)
+        image_shapes = np.array(self.file_shapes)
+        image_shapes = np.delete(
+            image_shapes, (self.initial_frame_axis, *self.additional_axes_iter), axis=1
+        )
+        n_dims = len(image_shapes[0])
+        equal = np.all(image_shapes == image_shapes[0])
+        self.shape = np.array(image_shapes[0] if equal else [None] * n_dims)
+
+        if insert_frame_axis:
+            _fa = map_negative_indices([frame_axis], len(self.shape) + 1)
+            self.shape = np.insert(self.shape, _fa, 1)
+        if self.shape[frame_axis]:
+            self.shape[frame_axis] = self.shape[frame_axis] * n_frames
+
+        # Thread-local file handle caches (one per thread)
+        self._local = threading.local()
+
+    # -- grain.RandomAccessDataSource protocol ---------------------------------
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, index: int) -> np.ndarray:
+        """Return a single sample as a numpy array. Thread-safe."""
+        file_name, key, indices = self.indices[index]
+        cache = self._get_cache()
+        file = cache.get_file(file_name)
+        return self._load(file, key, indices)
+
+    def __repr__(self) -> str:
+        return (
+            f"H5DataSource(n_samples={len(self)}, n_files={len(self.file_paths)}, key='{self.key}')"
+        )
+
+    # -- internals -------------------------------------------------------------
+
+    def _get_cache(self) -> H5FileHandleCache:
+        """Return the file-handle cache for the current thread."""
+        if not hasattr(self._local, "cache"):
+            self._local.cache = H5FileHandleCache()
+        return self._local.cache
+
+    def _load(self, file: File, key: str, indices):
+        """Read from an open HDF5 file and handle frame-axis logic."""
+        try:
+            images = file.load_data(key, indices)
+        except (OSError, IOError):
+            # Invalidate cache entry and retry once
+            cache = self._get_cache()
+            fname = file.filename
+            cache._file_handle_cache.pop(fname, None)
+            try:
+                file.close()
+            except Exception:
+                pass
+            file = cache.get_file(fname)
+            images = file.load_data(key, indices)
+
+        if self.insert_frame_axis:
+            initial = self.initial_frame_axis
+            if self.additional_axes_iter:
+                initial -= sum(ax < self.initial_frame_axis for ax in self.additional_axes_iter)
+            images = np.moveaxis(images, initial, self.frame_axis)
+        else:
+            images = np.concatenate(images, axis=self.frame_axis)
+
+        return images
+
+    def close(self):
+        """Close file handles for the current thread."""
+        cache = getattr(self._local, "cache", None)
+        if cache is not None:
+            cache.close()
+
+
+def _numpy_translate(array, range_from, range_to):
+    """Map values from ``range_from`` to ``range_to`` (pure numpy)."""
+    left_min, left_max = range_from
+    right_min, right_max = range_to
+    scaled = (array - left_min) / (left_max - left_min)
+    return right_min + scaled * (right_max - right_min)
+
+
+def _numpy_resize(image, image_size, resize_type="resize", rng=None):
+    """Resize a single image (H, W, ...) using pure numpy / skimage.
+
+    Args:
+        image: ndarray of shape ``(..., H, W, C)`` or ``(H, W, C)``.
+        image_size: ``(target_H, target_W)``.
+        resize_type: ``"resize"``, ``"center_crop"``, ``"random_crop"`` or
+            ``"crop_or_pad"``.
+        rng: ``numpy.random.Generator`` instance (needed for ``random_crop``).
+
+    Returns:
+        Resized ndarray.
+    """
+    th, tw = image_size
+    h, w = image.shape[-3], image.shape[-2]
+
+    if resize_type == "resize":
+        from skimage.transform import resize as skimage_resize
+
+        # Preserve leading dims — skimage resize works on full shape
+        target_shape = list(image.shape)
+        target_shape[-3] = th
+        target_shape[-2] = tw
+        return skimage_resize(image, target_shape, preserve_range=True, anti_aliasing=True).astype(
+            image.dtype
+        )
+
+    elif resize_type == "center_crop":
+        start_h = max((h - th) // 2, 0)
+        start_w = max((w - tw) // 2, 0)
+        return image[..., start_h : start_h + th, start_w : start_w + tw, :]
+
+    elif resize_type == "random_crop":
+        if rng is None:
+            rng = np.random.default_rng()
+        start_h = rng.integers(0, max(h - th, 0) + 1)
+        start_w = rng.integers(0, max(w - tw, 0) + 1)
+        return image[..., start_h : start_h + th, start_w : start_w + tw, :]
+
+    elif resize_type == "crop_or_pad":
+        # Center-crop then zero-pad to target
+        cropped_h = min(h, th)
+        cropped_w = min(w, tw)
+        start_h = max((h - th) // 2, 0)
+        start_w = max((w - tw) // 2, 0)
+        cropped = image[..., start_h : start_h + cropped_h, start_w : start_w + cropped_w, :]
+
+        if cropped_h == th and cropped_w == tw:
+            return cropped
+
+        # Pad
+        pad_h_before = (th - cropped_h) // 2
+        pad_h_after = th - cropped_h - pad_h_before
+        pad_w_before = (tw - cropped_w) // 2
+        pad_w_after = tw - cropped_w - pad_w_before
+        n_extra = len(image.shape) - 3  # leading dims
+        pad_width = [(0, 0)] * n_extra + [
+            (pad_h_before, pad_h_after),
+            (pad_w_before, pad_w_after),
+            (0, 0),
+        ]
+        return np.pad(cropped, pad_width, mode="constant", constant_values=0)
+
+    else:
+        raise ValueError(
+            f"Unsupported resize_type: '{resize_type}'. "
+            "Choose from 'resize', 'center_crop', 'random_crop', 'crop_or_pad'."
+        )
+
+
+class Dataloader:
+    """High-performance HDF5 dataloader built on `Grain <https://github.com/google/grain>`_.
+
+    Replaces the legacy TF ``make_dataloader`` pipeline with true
+    multi-threaded I/O.  The read path is:
+
+    .. code-block:: text
+
+        grain threads (N) → h5py (thread-local handles) → numpy → user
+
+    The entire pipeline runs in numpy — no framework dependency until
+    you feed tensors to your model.
+
+    Args:
+        file_paths: Path(s) to HDF5 directory(ies) or file(s).
+        key: HDF5 dataset key.
+        batch_size: Batch size. ``None`` disables batching.
+        n_frames: Consecutive frames per sample.
+        shuffle: Shuffle data each epoch.
+        seed: Random seed for shuffling.
+        limit_n_samples: Cap number of samples.
+        limit_n_frames: Cap frames per file.
+        drop_remainder: Drop last incomplete batch.
+        image_size: ``(H, W)`` target size.
+        resize_type: ``"resize"``, ``"center_crop"``, ``"random_crop"``
+            or ``"crop_or_pad"``.
+        image_range: Original value range of images, e.g. ``(-60, 0)``.
+        normalization_range: Target value range, e.g. ``(0, 1)``.
+        clip_image_range: Clip values to ``image_range`` before normalizing.
+        dataset_repetitions: Repeat dataset N times (``None`` = infinite).
+        additional_axes_iter: Extra axes to iterate over.
+        sort_files: Sort files numerically.
+        overlapping_blocks: Allow overlapping frame blocks.
+        augmentation: A callable ``(np.ndarray) -> np.ndarray`` applied
+            per-sample *after* normalization.
+        initial_frame_axis: Source frame axis in the file.
+        insert_frame_axis: Insert new frame axis.
+        frame_index_stride: Stride between frames.
+        frame_axis: Axis for stacking frames.
+        validate: Validate dataset against the zea format.
+        shard_index: Shard index for distributed training.
+        num_shards: Total number of shards.
+        num_threads: Threads for parallel reads (0 = main thread only).
+        prefetch_buffer_size: Grain prefetch buffer per process.
+
+    Example:
+        .. code-block:: python
+
+            loader = Dataloader(
+                file_paths="/data/camus",
+                key="data/image_sc",
+                batch_size=32,
+                image_range=(-60, 0),
+                normalization_range=(0, 1),
+                image_size=(256, 256),
+            )
+            for batch in loader:
+                ...  # batch.shape == (32, 256, 256, 1)
+    """
+
+    def __init__(
+        self,
+        file_paths: List[str] | str,
+        key: str = "data/image",
+        batch_size: int | None = 16,
+        n_frames: int = 1,
+        shuffle: bool = True,
+        seed: int | None = None,
+        limit_n_samples: int | None = None,
+        limit_n_frames: int | None = None,
+        drop_remainder: bool = False,
+        image_size: tuple | None = None,
+        resize_type: str | None = None,
+        image_range: tuple | None = None,
+        normalization_range: tuple | None = None,
+        clip_image_range: bool = False,
+        dataset_repetitions: int | None = None,
+        additional_axes_iter: tuple | None = None,
+        sort_files: bool = True,
+        overlapping_blocks: bool = False,
+        augmentation: callable = None,
+        initial_frame_axis: int = 0,
+        insert_frame_axis: bool = True,
+        frame_index_stride: int = 1,
+        frame_axis: int = -1,
+        validate: bool = True,
+        shard_index: int | None = None,
+        num_shards: int = 1,
+        num_threads: int = 16,
+        prefetch_buffer_size: int = 500,
+        **kwargs,
+    ):
+        import grain
+
+        # ── Validation ────────────────────────────────────────────────
+        if normalization_range is not None:
+            assert image_range is not None, (
+                "If normalization_range is set, image_range must be set too."
+            )
+        if num_shards > 1:
+            assert shard_index is not None, "shard_index must be specified"
+            assert 0 <= shard_index < num_shards
+
+        # ── Store config ──────────────────────────────────────────────
+        self.batch_size = batch_size
+        self.image_size = image_size
+        self.resize_type = resize_type or ("resize" if image_size else None)
+        self.image_range = image_range
+        self.normalization_range = normalization_range
+        self.clip_image_range = clip_image_range
+        self.augmentation = augmentation
+        self.num_threads = num_threads
+        self.prefetch_buffer_size = prefetch_buffer_size
+        self.shuffle = shuffle
+
+        # Grain requires a concrete seed for shuffle — generate one if needed
+        if seed is None and shuffle:
+            seed = int(np.random.default_rng().integers(0, 2**31))
+        self.seed = seed
+        self._rng = np.random.default_rng(seed)
+
+        # ── Data source ───────────────────────────────────────────────
+        self.source = H5DataSource(
+            file_paths=file_paths,
+            key=key,
+            n_frames=n_frames,
+            frame_index_stride=frame_index_stride,
+            frame_axis=frame_axis,
+            insert_frame_axis=insert_frame_axis,
+            initial_frame_axis=initial_frame_axis,
+            additional_axes_iter=additional_axes_iter,
+            sort_files=sort_files,
+            overlapping_blocks=overlapping_blocks,
+            limit_n_samples=limit_n_samples,
+            limit_n_frames=limit_n_frames,
+            validate=validate,
+            **kwargs,
+        )
+
+        # ── Build Grain pipeline ──────────────────────────────────────
+        ds = grain.MapDataset.source(self.source)
+
+        # Shuffle (before sharding, so every shard sees different order)
+        if shuffle:
+            ds = ds.shuffle(seed=seed)
+
+        # Shard
+        if num_shards > 1:
+            ds = ds[shard_index::num_shards]
+
+        # Per-sample transforms (executed in parallel threads)
+        ds = ds.map(self._transform_sample)
+
+        # Repeat
+        if dataset_repetitions is not None:
+            ds = ds.repeat(num_epochs=dataset_repetitions)
+
+        # Batch
+        if batch_size is not None:
+            ds = ds.batch(batch_size=batch_size, drop_remainder=drop_remainder)
+
+        self._map_dataset = ds
+
+    @property
+    def dataset(self):
+        """The underlying ``grain.MapDataset``."""
+        return self._map_dataset
+
+    def to_iter_dataset(self):
+        """Convert to a ``grain.IterDataset`` with prefetching.
+
+        This is called automatically when you iterate, but you can call
+        it explicitly if you want to hold onto the ``IterDataset`` object.
+        """
+        import grain
+
+        return self._map_dataset.to_iter_dataset(
+            grain.ReadOptions(
+                num_threads=self.num_threads,
+                prefetch_buffer_size=self.prefetch_buffer_size,
+            )
+        )
+
+    def __iter__(self):
+        return iter(self.to_iter_dataset())
+
+    def __len__(self):
+        """Number of batches (or samples if unbatched)."""
+        return len(self._map_dataset)
+
+    def __repr__(self):
+        return (
+            f"<Dataloader: {len(self.source)} samples, "
+            f"batch_size={self.batch_size}, "
+            f"key='{self.source.key}', "
+            f"shape={tuple(self.source.shape)}, "
+            f"threads={self.num_threads}>"
+        )
+
+    def _transform_sample(self, image: np.ndarray) -> np.ndarray:
+        """Apply all per-sample transforms. Runs in grain worker threads."""
+        # Ensure channel dim exists (at least 3-D)
+        if image.ndim < 3:
+            image = image[..., np.newaxis]
+
+        # Clip to image range
+        if self.clip_image_range and self.image_range is not None:
+            image = np.clip(image, self.image_range[0], self.image_range[1])
+
+        # Resize
+        if self.image_size is not None:
+            rng = self._rng if self.resize_type == "random_crop" else None
+            image = _numpy_resize(image, self.image_size, self.resize_type, rng=rng)
+
+        # Normalize
+        if self.normalization_range is not None:
+            image = _numpy_translate(image, self.image_range, self.normalization_range)
+
+        # Augmentation
+        if self.augmentation is not None:
+            image = self.augmentation(image)
+
+        return image
+
+    def summary(self):
+        """Print dataset statistics and per-directory breakdown."""
+        src = self.source
+        total_samples = len(src)
+        file_names = [idx[0] for idx in src.indices]
+        directories = sorted({str(Path(f).parent) for f in file_names})
+        samples_per_dir = count_samples_per_directory(file_names, directories)
+
+        parts = [f"Dataloader with {total_samples} total samples:"]
+        for dir_path, count in samples_per_dir.items():
+            pct = (count / total_samples) * 100 if total_samples else 0
+            parts.append(f"  {dir_path}: {count} samples ({pct:.1f}%)")
+        print("\n".join(parts))
+
+    def close(self):
+        """Release file handles."""
+        self.source.close()
