@@ -868,7 +868,7 @@ def calculate_delays_heterogeneous_medium(
     rx_delays = tof * sampling_frequency
     tx_delays = (
         tof
-        + t0_delays[:, 0][:, None]  # Only for multistatic data
+        + ops.diag(t0_delays)[:, None]  # Only for multistatic data
         - initial_times[:, None]
         + ops.take(t_peak, tx_waveform_indices)[:, None]
     ) * sampling_frequency
