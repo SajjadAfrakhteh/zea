@@ -1,4 +1,4 @@
-"""Basic testing datasets"""
+"""Testing for `zea.data.datasets` module."""
 
 from pathlib import Path
 
@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from zea.config import Config, check_config
+from zea.data.data_format import generate_example_dataset
 from zea.data.datasets import Dataset, Folder, split_files_by_directory
 from zea.internal.checks import _IMAGE_DATA_TYPES, _NON_IMAGE_DATA_TYPES
 
@@ -155,3 +156,69 @@ def test_split_files_by_directory(dir_sizes, splits, expected_counts, tmp_path):
     for dir_path, expected in zip(directories, expected_counts):
         count = sum(1 for f in result if f.startswith(dir_path))
         assert count == expected, f"Expected {expected} files from '{dir_path}', got {count}"
+
+
+def test_find_h5_files_finds_only_h5(tmp_path):
+    """Folder.find_h5_files returns only .hdf5 / .h5 files, ignoring others."""
+
+    # Create two HDF5 files and one unrelated file
+    generate_example_dataset(tmp_path / "a.hdf5")
+    generate_example_dataset(tmp_path / "b.h5")
+    (tmp_path / "notes.txt").write_text("ignore me")
+
+    folder = Folder(tmp_path, validate=False)
+    found = folder.find_h5_files()
+
+    assert len(found) == 2
+    assert all(f.endswith((".hdf5", ".h5")) for f in found)
+    assert not any(f.endswith(".txt") for f in found)
+
+
+def test_find_h5_files_recurses_subdirectories(tmp_path):
+    """find_h5_files discovers files in nested sub-directories."""
+
+    (tmp_path / "sub").mkdir()
+    generate_example_dataset(tmp_path / "root.hdf5")
+    generate_example_dataset(tmp_path / "sub" / "nested.hdf5")
+
+    folder = Folder(tmp_path, validate=False)
+    found = folder.find_h5_files()
+
+    assert len(found) == 2
+
+
+def test_folder_properties(dummy_dataset_path):
+    """Folder exposes correct n_files, __len__, __repr__ and __str__."""
+    folder = Folder(dummy_dataset_path, validate=False)
+
+    assert folder.n_files == 2
+    assert len(folder) == 2
+    assert repr(folder).startswith("<zea.data.datasets.Folder at 0x")
+    assert "2 files" in repr(folder)
+    assert dummy_dataset_path in repr(folder)
+    assert str(folder) == f"Folder with 2 files in '{dummy_dataset_path}'"
+
+
+def test_dataset_properties(dummy_dataset_path):
+    """Dataset exposes correct n_files, __len__, __repr__ and __str__."""
+    with Dataset(dummy_dataset_path, validate=False) as dataset:
+        assert dataset.n_files == 2
+        assert len(dataset) == 2
+        assert repr(dataset).startswith("<zea.data.datasets.Dataset at 0x")
+        assert "2 files" in repr(dataset)
+        assert str(dataset) == "Dataset with 2 files"
+
+
+def test_folder_rejects_invalid_type():
+    """Folder raises ValueError when given a non-string/Path argument."""
+    with pytest.raises(ValueError, match="Invalid folder path"):
+        Folder(12345, validate=False)
+
+
+def test_folder_rejects_single_file(dummy_dataset_path):
+    """Folder raises ValueError when given a path to a single file."""
+    file_path = Path(dummy_dataset_path) / Path(dummy_dataset_path).iterdir().__next__().name
+    # find an actual .hdf5 file inside the dummy dataset folder
+    file_path = next(Path(dummy_dataset_path).glob("*.hdf5"))
+    with pytest.raises(ValueError, match="Use File class instead"):
+        Folder(file_path, validate=False)
