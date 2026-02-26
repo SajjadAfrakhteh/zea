@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import keras
+from zea.data.layers import Resizer
 
 from zea import log
 from zea.data.datasets import Dataset, H5FileHandleCache, count_samples_per_directory
@@ -593,83 +594,63 @@ class H5DataSource:
         if cache is not None:
             cache.close()
 
-
-def _numpy_translate(array, range_from, range_to):
-    """Map values from ``range_from`` to ``range_to`` (pure numpy)."""
-    left_min, left_max = range_from
-    right_min, right_max = range_to
-    scaled = (array - left_min) / (left_max - left_min)
-    return right_min + scaled * (right_max - right_min)
+# ── Keras GPU transforms (layers + ops) ──────────────────────────────────────
 
 
-def _numpy_resize(image, image_size, resize_type="resize", rng=None):
-    """Resize a single image (H, W, ...) using pure numpy / skimage.
+def _build_gpu_transform_fn(
+    *,
+    image_size: tuple | None = None,
+    resize_type: str | None = None,
+    image_range: tuple | None = None,
+    normalization_range: tuple | None = None,
+    clip_image_range: bool = False,
+    augmentation: callable = None,
+):
+    """Return a single callable that applies all transforms on-device.
 
-    Args:
-        image: ndarray of shape ``(..., H, W, C)`` or ``(H, W, C)``.
-        image_size: ``(target_H, target_W)``.
-        resize_type: ``"resize"``, ``"center_crop"``, ``"random_crop"`` or
-            ``"crop_or_pad"``.
-        rng: ``numpy.random.Generator`` instance (needed for ``random_crop``).
+    Uses ``keras.layers.Resizing``, ``keras.layers.CenterCrop``, etc.
+    (via :class:`zea.data.layers.Resizer`) for spatial transforms and
+    ``keras.ops`` for clipping and normalization.
 
-    Returns:
-        Resized ndarray.
+    All configuration is captured in the closure so the returned function
+    has signature ``tensor -> tensor`` with zero lookup overhead.
     """
-    th, tw = image_size
-    h, w = image.shape[-3], image.shape[-2]
+    steps = []
 
-    if resize_type == "resize":
-        from skimage.transform import resize as skimage_resize
+    # Clip ------------------------------------------------------------------
+    if clip_image_range and image_range is not None:
+        lo, hi = image_range
+        steps.append(lambda t: keras.ops.clip(t, lo, hi))
 
-        # Preserve leading dims — skimage resize works on full shape
-        target_shape = list(image.shape)
-        target_shape[-3] = th
-        target_shape[-2] = tw
-        return skimage_resize(image, target_shape, preserve_range=True, anti_aliasing=True).astype(
-            image.dtype
-        )
+    # Resize / crop / pad ---------------------------------------------------
+    if image_size is not None and resize_type is not None:
+        resizer = Resizer(image_size, resize_type)
+        steps.append(resizer)
 
-    elif resize_type == "center_crop":
-        start_h = max((h - th) // 2, 0)
-        start_w = max((w - tw) // 2, 0)
-        return image[..., start_h : start_h + th, start_w : start_w + tw, :]
+    # Normalize -------------------------------------------------------------
+    if normalization_range is not None and image_range is not None:
+        left_min, left_max = image_range
+        right_min, right_max = normalization_range
+        # Rescaling: scale * x + offset
+        scale = (right_max - right_min) / (left_max - left_min)
+        offset = right_min - scale * left_min
+        rescaler = keras.layers.Rescaling(scale=scale, offset=offset)
+        steps.append(rescaler)
 
-    elif resize_type == "random_crop":
-        if rng is None:
-            rng = np.random.default_rng()
-        start_h = rng.integers(0, max(h - th, 0) + 1)
-        start_w = rng.integers(0, max(w - tw, 0) + 1)
-        return image[..., start_h : start_h + th, start_w : start_w + tw, :]
+    # Augmentation ----------------------------------------------------------
+    if augmentation is not None:
+        steps.append(augmentation)
 
-    elif resize_type == "crop_or_pad":
-        # Center-crop then zero-pad to target
-        cropped_h = min(h, th)
-        cropped_w = min(w, tw)
-        start_h = max((h - th) // 2, 0)
-        start_w = max((w - tw) // 2, 0)
-        cropped = image[..., start_h : start_h + cropped_h, start_w : start_w + cropped_w, :]
+    if not steps:
+        return None
 
-        if cropped_h == th and cropped_w == tw:
-            return cropped
+    def _apply(tensor):
+        for step in steps:
+            tensor = step(tensor)
+        return tensor
 
-        # Pad
-        pad_h_before = (th - cropped_h) // 2
-        pad_h_after = th - cropped_h - pad_h_before
-        pad_w_before = (tw - cropped_w) // 2
-        pad_w_after = tw - cropped_w - pad_w_before
-        n_extra = len(image.shape) - 3  # leading dims
-        pad_width = [(0, 0)] * n_extra + [
-            (pad_h_before, pad_h_after),
-            (pad_w_before, pad_w_after),
-            (0, 0),
-        ]
-        return np.pad(cropped, pad_width, mode="constant", constant_values=0)
+    return _apply
 
-    else:
-        raise ValueError(
-            f"Unsupported resize_type: '{resize_type}'. "
-            "Choose from 'resize', 'center_crop', 'random_crop', 'crop_or_pad'."
-        )
 
 def _make_transfer_fn(device: str | None = None):
     """Build a closure that transfers a numpy array to a backend device.
@@ -737,18 +718,34 @@ class _PrefetchToDevice:
         iterator: The source iterator yielding numpy arrays.
         device: Target device string passed to :func:`_make_transfer_fn`.
         prefetch_size: How many batches to keep in flight (default 2).
+        gpu_transform: Optional ``tensor -> tensor`` callable executed
+            on-device immediately after the host-to-device copy.
     """
 
-    def __init__(self, iterator, device: str | None = None, prefetch_size: int = 2):
-        self._iterator = iterator
+    def __init__(
+        self,
+        iterator,
+        device: str | None = None,
+        prefetch_size: int = 2,
+        gpu_transform: callable = None,
+    ):
+        self._iterator = iter(iterator)
         self._prefetch_size = prefetch_size
         self._buffer: deque = deque()
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._exhausted = False
         # Resolve imports and device once — the closure is import-free
         self._transfer = _make_transfer_fn(device)
+        self._gpu_transform = gpu_transform
         # Pre-fill the buffer
         self._fill()
+
+    def _transfer_and_transform(self, batch):
+        """Transfer *batch* to device, then apply GPU transforms."""
+        tensor = self._transfer(batch)
+        if self._gpu_transform is not None:
+            tensor = self._gpu_transform(tensor)
+        return tensor
 
     def _fill(self):
         """Submit transfer jobs until the buffer reaches *prefetch_size*."""
@@ -758,7 +755,7 @@ class _PrefetchToDevice:
             except StopIteration:
                 self._exhausted = True
                 break
-            future = self._executor.submit(self._transfer, batch)
+            future = self._executor.submit(self._transfer_and_transform, batch)
             self._buffer.append(future)
 
     def __iter__(self):
@@ -805,8 +802,8 @@ class Dataloader:
         additional_axes_iter: Extra axes to iterate over.
         sort_files: Sort files numerically.
         overlapping_blocks: Allow overlapping frame blocks.
-        augmentation: A callable ``(np.ndarray) -> np.ndarray`` applied
-            per-sample *after* normalization.
+        augmentation: A callable applied per-batch *after* normalization,
+            executed on-device via keras ops (must accept/return tensors).
         initial_frame_axis: Source frame axis in the file.
         insert_frame_axis: Insert new frame axis.
         frame_index_stride: Stride between frames.
@@ -922,8 +919,8 @@ class Dataloader:
         if num_shards > 1:
             ds = ds[shard_index::num_shards]
 
-        # Per-sample transforms (executed in parallel threads)
-        ds = ds.map(self._transform_sample)
+        # Ensure channel dim on CPU (needed for uniform batching)
+        ds = ds.map(self._ensure_channel_dim)
 
         # Repeat
         if dataset_repetitions is not None:
@@ -958,8 +955,20 @@ class Dataloader:
     def __iter__(self):
         it = self.to_iter_dataset()
         device = os.environ.get("CUDA_VISIBLE_DEVICES")
-        if device is not None:
-            return _PrefetchToDevice(it, device=device)
+
+        gpu_transform_fn = _build_gpu_transform_fn(
+            image_size=self.image_size,
+            resize_type=self.resize_type,
+            image_range=self.image_range,
+            normalization_range=self.normalization_range,
+            clip_image_range=self.clip_image_range,
+            augmentation=self.augmentation,
+        )
+
+        if device is not None or gpu_transform_fn is not None:
+            return _PrefetchToDevice(
+                it, device=device, gpu_transform=gpu_transform_fn
+            )
         return it
 
     def __len__(self):
@@ -975,29 +984,11 @@ class Dataloader:
             f"threads={self.num_threads}>"
         )
 
-    def _transform_sample(self, image: np.ndarray) -> np.ndarray:
-        """Apply all per-sample transforms. Runs in grain worker threads."""
-        # Ensure channel dim exists (at least 3-D)
+    @staticmethod
+    def _ensure_channel_dim(image: np.ndarray) -> np.ndarray:
+        """Ensure at least 3-D (H, W, C) so batching produces uniform shapes."""
         if image.ndim < 3:
             image = image[..., np.newaxis]
-
-        # Clip to image range
-        if self.clip_image_range and self.image_range is not None:
-            image = np.clip(image, self.image_range[0], self.image_range[1])
-
-        # Resize
-        if self.image_size is not None:
-            rng = self._rng if self.resize_type == "random_crop" else None
-            image = _numpy_resize(image, self.image_size, self.resize_type, rng=rng)
-
-        # Normalize
-        if self.normalization_range is not None:
-            image = _numpy_translate(image, self.image_range, self.normalization_range)
-
-        # Augmentation
-        if self.augmentation is not None:
-            image = self.augmentation(image)
-
         return image
 
     def summary(self):
