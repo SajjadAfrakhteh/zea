@@ -1,3 +1,18 @@
+"""CLI for converting common open-source ultrasound datasets to the zea format.
+
+Usage::
+
+    python -m zea.data.convert <dataset> <src> <dst> [options]
+
+Examples::
+
+    python -m zea.data.convert cetus ./raw ./output --download
+    python -m zea.data.convert camus ./raw ./output
+    python -m zea.data.convert echonet ./raw ./output
+
+Run ``python -m zea.data.convert --help`` for all options.
+"""
+
 import argparse
 
 from zea import init_device
@@ -84,6 +99,28 @@ def _add_parser_args_picmus(subparsers):
     picmus_parser.add_argument("dst", type=str, help="Destination folder path")
 
 
+def _add_parser_args_cetus(subparsers):
+    """Add CETUS specific arguments to the parser."""
+    cetus_parser = subparsers.add_parser("cetus", help="Convert CETUS dataset")
+    cetus_parser.add_argument("src", type=str, help="Source folder path")
+    cetus_parser.add_argument("dst", type=str, help="Destination folder path")
+    cetus_parser.add_argument(
+        "--download",
+        action="store_true",
+        help="Download the CETUS dataset from the server before converting",
+    )
+    cetus_parser.add_argument(
+        "--no_hyperthreading",
+        action="store_true",
+        help="Disable hyperthreading for multiprocessing",
+    )
+    cetus_parser.add_argument(
+        "--upload",
+        action="store_true",
+        help="Upload the converted dataset to HuggingFace Hub (zeahub/cetus-miccai-2014)",
+    )
+
+
 def _add_parser_args_verasonics(subparsers):
     verasonics_parser = subparsers.add_parser(
         "verasonics", help="Convert Verasonics data to zea dataset"
@@ -129,6 +166,7 @@ def get_parser():
     _add_parser_args_echonet(subparsers)
     _add_parser_args_echonetlvh(subparsers)
     _add_parser_args_camus(subparsers)
+    _add_parser_args_cetus(subparsers)
     _add_parser_args_picmus(subparsers)
     _add_parser_args_verasonics(subparsers)
     return parser
@@ -157,6 +195,10 @@ def main():
         from zea.data.convert.camus import convert_camus
 
         convert_camus(args)
+    elif args.dataset == "cetus":
+        from zea.data.convert.cetus import convert_cetus
+
+        convert_cetus(args)
     elif args.dataset == "picmus":
         from zea.data.convert.picmus import convert_picmus
 
