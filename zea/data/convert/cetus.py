@@ -178,12 +178,11 @@ def process_cetus(source_path, output_path, overwrite=False):
     # CETUS uses meters based on the spacing values ~0.0005763)
     voxel_spacing = np.array(metadata["spacing"], dtype=np.float64)
 
-    # The CETUS volumes have a background padding value that is NOT zero — it
-    # varies per file (e.g. 8 or 13).  Detect it as the mode of the integer
-    # histogram and create a binary mask so that background voxels are mapped
-    # to exactly -60 dB (pure black) regardless of the padding value.
-    bg_level = _detect_background_level(volume)
-    bg_mask = volume <= bg_level
+    # The CETUS volumes have a background padding value that is nonzero and varies per file.
+    # Here we detect it from the histogram and create a binary mask so that
+    # background voxels are mapped to exactly -60 dB (pure black).
+    bg_level = int(_detect_background_level(volume))
+    bg_mask = volume.astype(int) == bg_level
 
     # Convert B-mode intensity [0, 255] to dB range [-60, 0].
     volume_db = (volume / 255.0) * 60.0 - 60.0
@@ -558,7 +557,7 @@ Each HDF5 file follows the
 
 ## License
 
-**CC BY-NC-SA 4.0** - <https://creativecommons.org/licenses/by-nc-sa-4.0/legalcode>
+**CC BY-NC-SA 4.0** - <https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode>
 
 The CETUS dataset is available free of charge strictly for **non-commercial
 scientific research purposes only**.
