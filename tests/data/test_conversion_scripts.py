@@ -16,7 +16,7 @@ import SimpleITK as sitk
 import yaml
 
 from zea.data.convert.images import convert_image_dataset
-from zea.data.convert.utils import load_avi, unzip
+from zea.data.convert.utils import load_avi, sitk_load, unzip
 from zea.data.convert.verasonics import VerasonicsFile
 from zea.data.file import File
 from zea.data.preset_utils import _hf_resolve_path
@@ -681,6 +681,8 @@ def verify_converted_camus_test_data(dst):
 
 def verify_converted_cetus_test_data(dst):
     """Verify CETUS conversion produced correct train/val/test HDF5 files."""
+    from zea.data.convert.cetus import get_split
+
     expected = {
         "train": ["patient01_ED.hdf5", "patient01_ES.hdf5"],
         "val": ["patient31_ED.hdf5", "patient31_ES.hdf5"],
@@ -703,6 +705,10 @@ def verify_converted_cetus_test_data(dst):
         f.validate()
         assert "non_standard_elements/segmentation" in f
         assert "non_standard_elements/voxel_spacing" in f
+
+    # Exercise the error branch of get_split (not reachable via normal conversion)
+    with pytest.raises(ValueError):
+        get_split(0)
 
 
 def verify_converted_picmus_test_data(dst):
@@ -792,6 +798,27 @@ def test_load_avi(tmp_path):
     assert loaded_frames.shape == (10, 32, 32)
     for i in range(10):
         np.testing.assert_allclose(loaded_frames[i], frames[i], atol=1)
+
+
+def test_sitk_load(tmp_path):
+    """Direct test of sitk_load from zea.data.convert.utils."""
+    # Create a small 3-D NIfTI file
+    vol = np.arange(8, dtype=np.float32).reshape(2, 2, 2)
+    image = sitk.GetImageFromArray(vol)
+    image.SetSpacing((0.5, 0.5, 0.5))
+    nii_path = tmp_path / "test_vol.nii.gz"
+    sitk.WriteImage(image, str(nii_path))
+
+    # Load without squeeze (default)
+    arr, meta = sitk_load(nii_path)
+    assert arr.shape == (2, 2, 2)
+    assert "spacing" in meta
+    assert meta["spacing"] == (0.5, 0.5, 0.5)
+    assert "metadata" in meta
+
+    # Load with squeeze (no-op for a full 3-D volume, but exercises the path)
+    arr_sq, _ = sitk_load(nii_path, squeeze=True)
+    assert arr_sq.shape == arr.shape
 
 
 @pytest.mark.parametrize(

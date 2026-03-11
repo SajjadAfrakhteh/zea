@@ -8,6 +8,49 @@ from PIL import Image
 from zea import log
 
 
+def sitk_load(filepath: str | Path, squeeze: bool = False):
+    """Load a NIfTI/medical image using SimpleITK and return the array and metadata.
+
+    Args:
+        filepath: Path to the image file.
+        squeeze: If True, squeeze singleton dimensions from the array.
+            Defaults to False.
+
+    Returns:
+        Tuple of:
+            - Image array. Shape depends on the input and the ``squeeze`` parameter.
+            - Dictionary of metadata: ``origin``, ``spacing``, ``direction``, ``size``,
+              ``dimension``, and a ``metadata`` sub-dict with all image metadata keys.
+    """
+    try:
+        import SimpleITK as sitk
+    except ImportError as exc:
+        raise ImportError(
+            "SimpleITK is not installed. "
+            "Please install it with `pip install SimpleITK` to use this function."
+        ) from exc
+
+    image = sitk.ReadImage(str(filepath))
+
+    all_metadata = {}
+    for k in image.GetMetaDataKeys():
+        all_metadata[k] = image.GetMetaData(k)
+
+    metadata = {
+        "origin": image.GetOrigin(),
+        "spacing": image.GetSpacing(),
+        "direction": image.GetDirection(),
+        "size": image.GetSize(),
+        "dimension": image.GetDimension(),
+        "metadata": all_metadata,
+    }
+
+    im_array = sitk.GetArrayFromImage(image)
+    if squeeze:
+        im_array = np.squeeze(im_array)
+    return im_array, metadata
+
+
 def load_avi(file_path, mode="L"):
     """Load a .avi file and return a numpy array of frames.
 

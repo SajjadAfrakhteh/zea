@@ -313,7 +313,9 @@ def _process_task(task):
         raise
 
 
-def download_cetus(destination: str | Path, patients: list[int] | None = None) -> Path:
+def download_cetus(  # pragma: no cover
+    destination: str | Path, patients: list[int] | None = None
+) -> Path:
     """Download the CETUS dataset from the Girder server.
 
     Downloads NIfTI files for each patient (B-mode volumes and ground truth
@@ -592,14 +594,14 @@ If you use this dataset, please cite the original CETUS paper:
 """
 
 
-def _write_dataset_card(folder: Path) -> Path:
+def _write_dataset_card(folder: Path) -> Path:  # pragma: no cover
     """Write the HuggingFace dataset card (README.md) into *folder*."""
     card_path = folder / "README.md"
     card_path.write_text(_DATASET_CARD)
     return card_path
 
 
-def upload_cetus(output_folder: str | Path) -> None:
+def upload_cetus(output_folder: str | Path) -> None:  # pragma: no cover
     """Upload the converted CETUS dataset to HuggingFace Hub.
 
     Writes a dataset card, prints an upload summary, and asks for

@@ -15,7 +15,6 @@ import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, Tuple
 
 import numpy as np
 import scipy
@@ -23,7 +22,7 @@ from skimage.transform import resize
 from tqdm import tqdm
 
 from zea import log
-from zea.data.convert.utils import unzip
+from zea.data.convert.utils import sitk_load, unzip
 from zea.data.data_format import generate_zea_dataset
 from zea.func.tensor import translate
 from zea.internal.utils import find_first_nonzero_index
@@ -120,45 +119,6 @@ def transform_sc_image_to_polar(image_sc, output_size=None, fit_outline=True):
 
     # Resize image to output_size
     return resize(polar_image, output_size, preserve_range=True)
-
-
-def sitk_load(filepath: str | Path) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """Loads an image using SimpleITK and returns the image and its metadata.
-
-    Args:
-        filepath: Path to the image.
-
-    Returns:
-        - Image array of shape (num_frames, height, width).
-        - Collection of metadata.
-    """
-    # Load image and save info
-    try:
-        import SimpleITK as sitk
-    except ImportError as exc:
-        raise ImportError(
-            "SimpleITK is not installed. "
-            "Please install it with `pip install SimpleITK` to convert CAMUS dataset."
-        ) from exc
-
-    image = sitk.ReadImage(str(filepath))
-
-    all_metadata = {}
-    for k in image.GetMetaDataKeys():
-        all_metadata[k] = image.GetMetaData(k)
-
-    metadata = {
-        "origin": image.GetOrigin(),
-        "ElementSpacing": image.GetSpacing(),
-        "direction": image.GetDirection(),
-        "NDims": image.GetDimension(),
-        "metadata": all_metadata,
-    }
-
-    # Extract numpy array from the SimpleITK image object
-    im_array = sitk.GetArrayFromImage(image)
-
-    return im_array, metadata
 
 
 def process_camus(source_path, output_path, overwrite=False):
