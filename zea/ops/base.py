@@ -25,6 +25,21 @@ def get_ops(ops_name):
     return ops_registry[ops_name]
 
 
+def _to_native(value):
+    """Convert non-serializable types (e.g. numpy) to native Python equivalents."""
+    if hasattr(value, "item"):  # numpy scalar
+        return value.item()
+    if hasattr(value, "tolist") and hasattr(value, "ndim"):  # numpy array
+        return value.tolist()
+    if isinstance(value, tuple):
+        return tuple(_to_native(v) for v in value)
+    if isinstance(value, list):
+        return [_to_native(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _to_native(v) for k, v in value.items()}
+    return value
+
+
 class Operation(keras.Operation):
     """
     A base abstract class for operations in the pipeline with caching functionality.
@@ -271,19 +286,41 @@ class Operation(keras.Operation):
                 parameters that differ from their defaults.
         """
         config = {"name": ops_registry.get_name(self)}
+        params = {}
 
+        # Collect subclass-specific params from the MRO (excluding Operation base)
+        base_param_names = set(inspect.signature(Operation.__init__).parameters.keys())
+        seen = set()
+
+        for cls in type(self).__mro__:
+            if not issubclass(cls, Operation) or cls is Operation:
+                continue
+            init_fn = cls.__dict__.get("__init__")
+            if init_fn is None:
+                continue
+            for name, param in inspect.signature(init_fn).parameters.items():
+                if name == "self" or name in base_param_names or name in seen:
+                    continue
+                if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+                    continue
+                seen.add(name)
+
+                value = _to_native(getattr(self, name, None))
+                if verbose:
+                    params[name] = value
+                elif param.default is inspect.Parameter.empty or value != param.default:
+                    params[name] = value
+
+        # Base Operation parameters
         if verbose:
-            config["params"] = {
-                "key": self.key,
-                "output_key": self.output_key,
-                "cache_inputs": self.cache_inputs,
-                "cache_outputs": self.cache_outputs,
-                "jit_compile": self._jit_compile,
-                "with_batch_dim": self.with_batch_dim,
-                "jit_kwargs": self._user_jit_kwargs,
-            }
+            params["key"] = self.key
+            params["output_key"] = self.output_key
+            params["cache_inputs"] = self.cache_inputs
+            params["cache_outputs"] = self.cache_outputs
+            params["jit_compile"] = self._jit_compile
+            params["with_batch_dim"] = self.with_batch_dim
+            params["jit_kwargs"] = self._user_jit_kwargs
         else:
-            params = {}
             if self.key != "data":
                 params["key"] = self.key
             if self.output_key != self.key:
@@ -298,8 +335,9 @@ class Operation(keras.Operation):
                 params["with_batch_dim"] = self.with_batch_dim
             if self._user_jit_kwargs:
                 params["jit_kwargs"] = self._user_jit_kwargs
-            if params:
-                config["params"] = params
+
+        if params:
+            config["params"] = params
 
         return config
 

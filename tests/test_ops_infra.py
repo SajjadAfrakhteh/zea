@@ -647,6 +647,71 @@ def test_compact_output_includes_nondefaults():
     assert beamform_dict["params"]["beamformer"] == "delay_multiply_and_sum"
 
 
+def test_operation_subclass_params_serialized():
+    """Test that subclass-specific __init__ params are included in get_dict()."""
+    from zea.ops import (
+        Demodulate,
+        Downsample,
+        EnvelopeDetect,
+        LogCompress,
+        Normalize,
+    )
+
+    # Non-default params should appear in compact mode
+    ds = Downsample(factor=4, phase=2)
+    d = ds.get_dict()
+    assert d["params"]["factor"] == 4
+    assert d["params"]["phase"] == 2
+
+    # Default params should be omitted in compact mode
+    ds_default = Downsample()
+    d_default = ds_default.get_dict()
+    assert "params" not in d_default
+
+    # Verbose mode should include all params
+    d_verbose = ds_default.get_dict(verbose=True)
+    assert d_verbose["params"]["factor"] == 1
+    assert d_verbose["params"]["phase"] == 0
+    assert d_verbose["params"]["axis"] == -3
+
+    # Operations with no custom params should still work
+    ed = EnvelopeDetect()
+    assert ed.get_dict() == {"name": "envelope_detect"}
+
+    # LogCompress with non-default clip
+    lc = LogCompress(clip=-40)
+    d_lc = lc.get_dict()
+    assert d_lc["params"]["clip"] == -40
+
+    # LogCompress with default clip should omit params
+    lc_default = LogCompress()
+    assert "params" not in lc_default.get_dict()
+
+    # Round-trip: pipeline with subclass params survives save/load
+    pipeline = Pipeline(
+        operations=[
+            Demodulate(),
+            Downsample(factor=4),
+            Normalize(output_range=(0, 255)),
+            EnvelopeDetect(),
+            LogCompress(clip=-60),
+        ],
+        jit_options=None,
+    )
+
+    config = pipeline.to_config()
+    op_dicts = config["pipeline"]["operations"]
+
+    # Verify non-default params are present
+    assert op_dicts[1]["params"]["factor"] == 4
+    assert op_dicts[2]["params"]["output_range"] == [0, 255]
+    assert op_dicts[4]["params"]["clip"] == -60
+
+    # Rebuild and verify equality
+    pipeline2 = pipeline_from_config(config, jit_options=None)
+    assert str(pipeline) == str(pipeline2)
+
+
 def get_probe():
     """Returns a probe for ultrasound simulation tests."""
     n_el = 128

@@ -270,7 +270,7 @@ class Threshold(Operation):
             raise ValueError("threshold_type must be 'hard' or 'soft'")
         self.threshold_type = threshold_type
         self.below_threshold = below_threshold
-        self._fill_value_type = fill_value
+        self.fill_value = fill_value
 
         # Define threshold function at init
         if threshold_type == "hard":
@@ -294,7 +294,7 @@ class Threshold(Operation):
 
     def _resolve_fill_value(self, data, threshold):
         """Get the fill value based on the fill_value_type."""
-        fv = self._fill_value_type
+        fv = self.fill_value
         if isinstance(fv, (int, float)):
             return ops.convert_to_tensor(fv, dtype=data.dtype)
         elif fv == "min":
