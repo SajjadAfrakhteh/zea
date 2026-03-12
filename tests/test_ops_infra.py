@@ -13,9 +13,9 @@ from zea.config import Config
 from zea.internal.core import DEFAULT_DYNAMIC_RANGE, DataTypes
 from zea.internal.registry import ops_registry
 from zea.ops.pipeline import (
+    Pipeline,
     pipeline_from_config,
     pipeline_from_json,
-    pipeline_from_yaml,
     pipeline_to_yaml,
 )
 from zea.probes import Probe
@@ -103,10 +103,12 @@ def test_operation():
 def pipeline_config():
     """Returns a test pipeline configuration."""
     return {
-        "operations": [
-            {"name": "multiply", "params": {}},
-            {"name": "add", "params": {}},
-        ]
+        "pipeline": {
+            "operations": [
+                {"name": "multiply", "params": {}},
+                {"name": "add", "params": {}},
+            ]
+        }
     }
 
 
@@ -114,10 +116,12 @@ def pipeline_config():
 def pipeline_config_with_params():
     """Returns a test pipeline configuration with parameters."""
     return {
-        "operations": [
-            {"name": "multiply", "params": {"useless_parameter": 10}},
-            {"name": "add"},
-        ]
+        "pipeline": {
+            "operations": [
+                {"name": "multiply", "params": {"useless_parameter": 10}},
+                {"name": "add"},
+            ]
+        }
     }
 
 
@@ -125,17 +129,19 @@ def pipeline_config_with_params():
 def default_pipeline_config():
     """Config for default pipeline"""
     return {
-        "operations": [
-            {"name": "simulate_rf"},
-            {"name": "demodulate"},
-            {"name": "tof_correction"},
-            {"name": "pfield_weighting"},
-            {"name": "delay_and_sum"},
-            {"name": "reshape_grid"},
-            {"name": "envelope_detect"},
-            {"name": "normalize"},
-            {"name": "log_compress"},
-        ]
+        "pipeline": {
+            "operations": [
+                {"name": "simulate_rf"},
+                {"name": "demodulate"},
+                {"name": "tof_correction"},
+                {"name": "pfield_weighting"},
+                {"name": "delay_and_sum"},
+                {"name": "reshape_grid"},
+                {"name": "envelope_detect"},
+                {"name": "normalize"},
+                {"name": "log_compress"},
+            ]
+        }
     }
 
 
@@ -143,21 +149,23 @@ def default_pipeline_config():
 def patched_pipeline_config():
     """Config for patch-wise default pipeline"""
     return {
-        "operations": [
-            {"name": "simulate_rf"},
-            {"name": "demodulate"},
-            {
-                "name": "beamform",
-                "params": {
-                    "beamformer": "delay_and_sum",
-                    "num_patches": 15,
-                    "enable_pfield": True,
+        "pipeline": {
+            "operations": [
+                {"name": "simulate_rf"},
+                {"name": "demodulate"},
+                {
+                    "name": "beamform",
+                    "params": {
+                        "beamformer": "delay_and_sum",
+                        "num_patches": 15,
+                        "enable_pfield": True,
+                    },
                 },
-            },
-            {"name": "envelope_detect"},
-            {"name": "normalize"},
-            {"name": "log_compress"},
-        ]
+                {"name": "envelope_detect"},
+                {"name": "normalize"},
+                {"name": "log_compress"},
+            ]
+        }
     }
 
 
@@ -509,7 +517,7 @@ def test_pipeline_to_yaml(config_fixture, request, tmp_path):
     pipeline.to_yaml(path)
 
     # Load the pipeline from the YAML file
-    new_pipeline = pipeline_from_yaml(path, jit_options=None)
+    new_pipeline = Pipeline.from_path(path, jit_options=None)
 
     validate_default_pipeline(new_pipeline, patched=config_fixture == "patched_pipeline_config")
 
@@ -517,19 +525,21 @@ def test_pipeline_to_yaml(config_fixture, request, tmp_path):
 # ---- Round-trip tests for config saving/loading ----
 
 BEAMFORM_CONFIG = {
-    "operations": [
-        {
-            "name": "beamform",
-            "params": {
-                "beamformer": "delay_and_sum",
-                "enable_pfield": False,
-                "num_patches": 200,
+    "pipeline": {
+        "operations": [
+            {
+                "name": "beamform",
+                "params": {
+                    "beamformer": "delay_and_sum",
+                    "enable_pfield": False,
+                    "num_patches": 200,
+                },
             },
-        },
-        {"name": "envelope_detect"},
-        {"name": "normalize"},
-        {"name": "log_compress"},
-    ]
+            {"name": "envelope_detect"},
+            {"name": "normalize"},
+            {"name": "log_compress"},
+        ]
+    }
 }
 
 
@@ -559,14 +569,14 @@ def test_beamform_config_roundtrip(verbose, tmp_path):
     # YAML round-trip
     yaml_path = tmp_path / "beamform.yaml"
     pipeline.to_yaml(yaml_path, verbose=verbose)
-    yaml_pipeline = pipeline_from_yaml(yaml_path, jit_options=None)
+    yaml_pipeline = Pipeline.from_path(yaml_path, jit_options=None)
     assert isinstance(yaml_pipeline.operations[0], ops.Beamform)
     assert yaml_pipeline.operations[0].num_patches == 200
 
     # Verify YAML does NOT contain expanded operations
     with open(yaml_path) as f:
         yaml_content = yaml.safe_load(f)
-    beamform_entry = yaml_content["operations"][0]
+    beamform_entry = yaml_content["pipeline"]["operations"][0]
     assert "operations" not in beamform_entry, "Beamform should not serialize internal operations"
 
 
@@ -592,20 +602,22 @@ def test_compact_output_omits_defaults():
     """Test that compact mode omits default parameters."""
     config = Config(
         {
-            "operations": [
-                {"name": "beamform"},
-                {"name": "envelope_detect"},
-            ]
+            "pipeline": {
+                "operations": [
+                    {"name": "beamform"},
+                    {"name": "envelope_detect"},
+                ]
+            }
         }
     )
     pipeline = pipeline_from_config(config)
 
     compact = pipeline.to_config()
-    beamform_dict = compact["operations"][0]
+    beamform_dict = compact["pipeline"]["operations"][0]
     assert beamform_dict == {"name": "beamform"}
 
     verbose = pipeline.to_config(verbose=True)
-    beamform_dict = verbose["operations"][0]
+    beamform_dict = verbose["pipeline"]["operations"][0]
     assert "params" in beamform_dict
     assert beamform_dict["params"]["beamformer"] == "delay_and_sum"
     assert beamform_dict["params"]["num_patches"] == 100
@@ -616,19 +628,21 @@ def test_compact_output_includes_nondefaults():
     """Test that compact mode includes non-default parameters."""
     config = Config(
         {
-            "operations": [
-                {
-                    "name": "beamform",
-                    "params": {"num_patches": 50, "beamformer": "delay_multiply_and_sum"},
-                },
-                {"name": "normalize"},
-            ]
+            "pipeline": {
+                "operations": [
+                    {
+                        "name": "beamform",
+                        "params": {"num_patches": 50, "beamformer": "delay_multiply_and_sum"},
+                    },
+                    {"name": "normalize"},
+                ]
+            }
         }
     )
     pipeline = pipeline_from_config(config, jit_options=None)
 
     compact = pipeline.to_config()
-    beamform_dict = compact["operations"][0]
+    beamform_dict = compact["pipeline"]["operations"][0]
     assert beamform_dict["params"]["num_patches"] == 50
     assert beamform_dict["params"]["beamformer"] == "delay_multiply_and_sum"
 

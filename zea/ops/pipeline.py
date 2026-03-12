@@ -21,6 +21,7 @@ from zea.internal.core import (
 )
 from zea.internal.core import Object as ZEAObject
 from zea.internal.registry import ops_registry
+from zea.internal.utils import deprecated
 from zea.ops.base import (
     Operation,
     get_ops,
@@ -495,7 +496,7 @@ class Pipeline:
                 json_str = f.read()
             return pipeline_from_json(json_str, **kwargs)
         elif file_path.endswith(".yaml") or file_path.endswith(".yml"):
-            return pipeline_from_yaml(file_path, **kwargs)
+            return cls.from_path(file_path, **kwargs)
         else:
             raise ValueError("File must have extension .json, .yaml, or .yml")
 
@@ -543,10 +544,8 @@ class Pipeline:
 
         Args:
             config (dict or Config): Configuration dictionary or ``zea.Config`` object.
+                Must have a ``pipeline`` key with a subkey ``operations``.
             **kwargs: Additional keyword arguments to be passed to the pipeline.
-
-        Note:
-            Must have a ``pipeline`` key with a subkey ``operations``.
 
         Example:
             .. doctest::
@@ -554,9 +553,11 @@ class Pipeline:
                 >>> from zea import Config, Pipeline
                 >>> config = Config(
                 ...     {
-                ...         "operations": [
-                ...             "identity",
-                ...         ],
+                ...         "pipeline": {
+                ...             "operations": [
+                ...                 "identity",
+                ...             ],
+                ...         }
                 ...     }
                 ... )
                 >>> pipeline = Pipeline.from_config(config)
@@ -564,32 +565,37 @@ class Pipeline:
         return pipeline_from_config(Config(config), **kwargs)
 
     @classmethod
-    def from_yaml(cls, file_path: str, **kwargs) -> "Pipeline":
-        """Create a pipeline from a YAML file.
+    def from_path(cls, file_path: str, **kwargs) -> "Pipeline":
+        """Create a pipeline from a YAML/config file path.
 
         Args:
-            file_path (str): Path to the YAML file.
+            file_path (str): Path to the config file (local or ``hf://`` URI).
+                Must have a ``pipeline`` key with a subkey ``operations``.
             **kwargs: Additional keyword arguments to be passed to the pipeline.
-
-        Note:
-            Must have the a `pipeline` key with a subkey `operations`.
 
         Example:
             .. doctest::
 
-                >>> import yaml
-                >>> from zea import Config
-                >>> # Create a sample pipeline YAML file
-                >>> pipeline_dict = {
-                ...     "operations": [
-                ...         "identity",
-                ...     ],
-                ... }
-                >>> with open("pipeline.yaml", "w") as f:
-                ...     yaml.dump(pipeline_dict, f)
-                >>> from zea.ops import Pipeline
-                >>> pipeline = Pipeline.from_yaml("pipeline.yaml", jit_options=None)
+                >>> from zea import Config, Pipeline
+                >>> config = Config(
+                ...     {
+                ...         "pipeline": {
+                ...             "operations": [
+                ...                 "identity",
+                ...             ],
+                ...         }
+                ...     }
+                ... )
+                >>> config.save_to_yaml("pipeline.yaml")
+                >>> pipeline = Pipeline.from_path("pipeline.yaml")
         """
+        config = Config.from_path(file_path)
+        return pipeline_from_config(config, **kwargs)
+
+    @classmethod
+    @deprecated(replacement="Pipeline.from_path")
+    def from_yaml(cls, file_path: str, **kwargs) -> "Pipeline":
+        """Deprecated. Use :meth:`from_path` instead."""
         return pipeline_from_yaml(file_path, **kwargs)
 
     @classmethod
@@ -598,14 +604,12 @@ class Pipeline:
 
         Args:
             json_string (str): JSON string representing the pipeline.
+                Must have a ``pipeline`` key with a subkey ``operations``.
             **kwargs: Additional keyword arguments to be passed to the pipeline.
-
-        Note:
-            Must have the `operations` key.
 
         Example:
         ```python
-        json_string = '{"operations": ["identity"]}'
+        json_string = '{"pipeline": {"operations": ["identity"]}}'
         pipeline = Pipeline.from_json(json_string)
         ```
         """
@@ -1255,13 +1259,31 @@ def make_operation_chain(
 def pipeline_from_config(config: Config, **kwargs) -> Pipeline:
     """
     Create a Pipeline instance from a Config object.
+
+    The config should have a ``pipeline`` key containing an ``operations`` list.
+    A config with ``operations`` at the top level is also accepted.
     """
-    assert "operations" in config, (
-        "Config object must have an 'operations' key for pipeline creation."
-    )
-    assert isinstance(config.operations, (list, np.ndarray)), (
-        "Config object must have a list or numpy array of operations for pipeline creation."
-    )
+    # Unwrap the 'pipeline' key if present
+    if "pipeline" in config:
+        config = Config(config["pipeline"])
+
+    if "operations" not in config:
+        top_keys = list(config.keys()) if hasattr(config, "keys") else []
+        raise ValueError(
+            f"Cannot build Pipeline: missing 'operations' key.\n"
+            f"Expected a config with the format:\n"
+            f"  pipeline:\n"
+            f"    operations:\n"
+            f"      - <operation_name>\n"
+            f"      - ...\n"
+            f"Found top-level keys: {top_keys}"
+        )
+
+    if not isinstance(config.operations, (list, np.ndarray)):
+        raise ValueError(
+            f"Cannot build Pipeline: 'operations' must be a list, "
+            f"got {type(config.operations).__name__}."
+        )
 
     operations = make_operation_chain(config.operations)
 
@@ -1281,9 +1303,13 @@ def pipeline_from_json(json_string: str, **kwargs) -> Pipeline:
     return pipeline_from_config(pipeline_config, **kwargs)
 
 
+@deprecated(replacement="Pipeline.from_path")
 def pipeline_from_yaml(yaml_path: str, **kwargs) -> Pipeline:
     """
     Create a Pipeline instance from a YAML file.
+
+    .. deprecated::
+        Use :meth:`Pipeline.from_path` instead.
     """
     with open(yaml_path, "r", encoding="utf-8") as f:
         pipeline_config = yaml.safe_load(f)
@@ -1291,12 +1317,12 @@ def pipeline_from_yaml(yaml_path: str, **kwargs) -> Pipeline:
 
 
 def _pipeline_to_serializable_dict(pipeline: Pipeline, verbose=False) -> dict:
-    """Convert a Pipeline to a flat operations dict suitable for serialization.
+    """Convert a Pipeline to a dict suitable for serialization.
 
-    The output format is ``{"operations": [<list of operation dicts>]}``
+    The output format is ``{"pipeline": {"operations": [<list of operation dicts>]}}``
     which can be loaded back via ``pipeline_from_config``.
     """
-    return {"operations": Pipeline._pipeline_to_list(pipeline, verbose=verbose)}
+    return {"pipeline": {"operations": Pipeline._pipeline_to_list(pipeline, verbose=verbose)}}
 
 
 def pipeline_to_config(pipeline: Pipeline, verbose=False) -> Config:
