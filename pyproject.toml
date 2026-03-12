@@ -1,5 +1,5 @@
 [build-system]
-requires = ["poetry-core", "setuptools"]
+requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [project]
@@ -73,6 +73,7 @@ dev = [
     "sphinxcontrib-autoprogram",
     "sphinx-reredirects",
     "sphinxcontrib-bibtex",
+    "setuptools",
     "myst-parser",
     "nbsphinx",
     "furo",
@@ -104,6 +105,7 @@ docs = [
     "sphinxcontrib-autoprogram",
     "sphinx-reredirects",
     "sphinxcontrib-bibtex",
+    "setuptools",
     "myst-parser",
     "nbsphinx",
     "furo",
