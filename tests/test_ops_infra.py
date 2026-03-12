@@ -16,6 +16,7 @@ from zea.ops.pipeline import (
     pipeline_from_config,
     pipeline_from_json,
     pipeline_from_yaml,
+    pipeline_to_yaml,
 )
 from zea.probes import Probe
 from zea.scan import Scan
@@ -511,6 +512,125 @@ def test_pipeline_to_yaml(config_fixture, request, tmp_path):
     new_pipeline = pipeline_from_yaml(path, jit_options=None)
 
     validate_default_pipeline(new_pipeline, patched=config_fixture == "patched_pipeline_config")
+
+
+# ---- Round-trip tests for config saving/loading ----
+
+BEAMFORM_CONFIG = {
+    "operations": [
+        {
+            "name": "beamform",
+            "params": {
+                "beamformer": "delay_and_sum",
+                "enable_pfield": False,
+                "num_patches": 200,
+            },
+        },
+        {"name": "envelope_detect"},
+        {"name": "normalize"},
+        {"name": "log_compress"},
+    ]
+}
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_beamform_config_roundtrip(verbose, tmp_path):
+    """Test that a beamform pipeline round-trips through config without expanding internals."""
+    import yaml
+
+    config = Config(BEAMFORM_CONFIG)
+    pipeline = pipeline_from_config(config, jit_options=None)
+
+    # Config round-trip
+    new_config = pipeline.to_config(verbose=verbose)
+    new_pipeline = pipeline_from_config(new_config, jit_options=None)
+    assert isinstance(new_pipeline.operations[0], ops.Beamform)
+    assert new_pipeline.operations[0].beamformer_type == "delay_and_sum"
+    assert new_pipeline.operations[0].num_patches == 200
+    assert new_pipeline.operations[0].enable_pfield is False
+    assert len(new_pipeline.operations) == 4
+
+    # JSON round-trip
+    json_str = pipeline.to_json(verbose=verbose)
+    json_pipeline = pipeline_from_json(json_str, jit_options=None)
+    assert isinstance(json_pipeline.operations[0], ops.Beamform)
+    assert json_pipeline.operations[0].num_patches == 200
+
+    # YAML round-trip
+    yaml_path = tmp_path / "beamform.yaml"
+    pipeline.to_yaml(yaml_path, verbose=verbose)
+    yaml_pipeline = pipeline_from_yaml(yaml_path, jit_options=None)
+    assert isinstance(yaml_pipeline.operations[0], ops.Beamform)
+    assert yaml_pipeline.operations[0].num_patches == 200
+
+    # Verify YAML does NOT contain expanded operations
+    with open(yaml_path) as f:
+        yaml_content = yaml.safe_load(f)
+    beamform_entry = yaml_content["operations"][0]
+    assert "operations" not in beamform_entry, "Beamform should not serialize internal operations"
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_yaml_roundtrip_via_config_from_path(verbose, tmp_path):
+    """Test loading a saved YAML via Config.from_path → Pipeline.from_config."""
+    config = Config(BEAMFORM_CONFIG)
+    pipeline = pipeline_from_config(config, jit_options=None)
+
+    yaml_path = tmp_path / "pipeline.yaml"
+    pipeline_to_yaml(pipeline, str(yaml_path), verbose=verbose)
+
+    # Load through Config.from_path (the path that was previously broken)
+    loaded_config = Config.from_path(str(yaml_path))
+    loaded_pipeline = pipeline_from_config(loaded_config, jit_options=None)
+
+    assert len(loaded_pipeline.operations) == 4
+    assert isinstance(loaded_pipeline.operations[0], ops.Beamform)
+    assert loaded_pipeline.operations[0].num_patches == 200
+
+
+def test_compact_output_omits_defaults():
+    """Test that compact mode omits default parameters."""
+    config = Config(
+        {
+            "operations": [
+                {"name": "beamform"},
+                {"name": "envelope_detect"},
+            ]
+        }
+    )
+    pipeline = pipeline_from_config(config)
+
+    compact = pipeline.to_config()
+    beamform_dict = compact["operations"][0]
+    assert beamform_dict == {"name": "beamform"}
+
+    verbose = pipeline.to_config(verbose=True)
+    beamform_dict = verbose["operations"][0]
+    assert "params" in beamform_dict
+    assert beamform_dict["params"]["beamformer"] == "delay_and_sum"
+    assert beamform_dict["params"]["num_patches"] == 100
+    assert beamform_dict["params"]["enable_pfield"] is False
+
+
+def test_compact_output_includes_nondefaults():
+    """Test that compact mode includes non-default parameters."""
+    config = Config(
+        {
+            "operations": [
+                {
+                    "name": "beamform",
+                    "params": {"num_patches": 50, "beamformer": "delay_multiply_and_sum"},
+                },
+                {"name": "normalize"},
+            ]
+        }
+    )
+    pipeline = pipeline_from_config(config, jit_options=None)
+
+    compact = pipeline.to_config()
+    beamform_dict = compact["operations"][0]
+    assert beamform_dict["params"]["num_patches"] == 50
+    assert beamform_dict["params"]["beamformer"] == "delay_multiply_and_sum"
 
 
 def get_probe():

@@ -897,20 +897,22 @@ class Map(Pipeline):
         inputs.update(output)
         return inputs
 
-    def get_dict(self):
+    def get_dict(self, verbose=False):
         """Get the configuration of the pipeline."""
-        config = super().get_dict()
-        config.update({"name": "map"})
+        config = super().get_dict(verbose=verbose)
+        config["name"] = "map"
 
-        config["params"].update(
-            {
-                "argnames": self.argnames,
-                "in_axes": self.in_axes,
-                "out_axes": self.out_axes,
-                "chunks": self.chunks,
-                "batch_size": self.batch_size,
-            }
-        )
+        params = config.get("params", {})
+        params["argnames"] = self.argnames
+        if verbose or self.in_axes != 0:
+            params["in_axes"] = self.in_axes
+        if verbose or self.out_axes != 0:
+            params["out_axes"] = self.out_axes
+        if verbose or self.chunks is not None:
+            params["chunks"] = self.chunks
+        if verbose or self.batch_size is not None:
+            params["batch_size"] = self.batch_size
+        config["params"] = params
         return config
 
 
@@ -1028,17 +1030,39 @@ class Beamform(Pipeline):
                 operations.append(operation.__class__.__name__)
         return f"<Beamform {self.name}=({', '.join(operations)})>"
 
-    def get_dict(self) -> dict:
-        """Convert the pipeline to a dictionary."""
-        config = super().get_dict()
-        config.update({"name": "beamform"})
-        config["params"].update(
-            {
-                "beamformer": self.beamformer_type,
-                "num_patches": self.num_patches,
-                "enable_pfield": self.enable_pfield,
-            }
-        )
+    def get_dict(self, verbose=False) -> dict:
+        """Convert the pipeline to a dictionary.
+
+        Unlike Pipeline.get_dict(), this does NOT include the internal
+        operations list, since Beamform auto-generates its operations
+        from ``beamformer``, ``num_patches``, and ``enable_pfield``.
+        """
+        config = {"name": "beamform"}
+
+        params = {}
+        if verbose or self.beamformer_type != "delay_and_sum":
+            params["beamformer"] = self.beamformer_type
+        if verbose or self.num_patches != 100:
+            params["num_patches"] = self.num_patches
+        if verbose or self.enable_pfield:
+            params["enable_pfield"] = self.enable_pfield
+
+        # Pipeline-level params
+        if verbose:
+            params["with_batch_dim"] = self.with_batch_dim
+            params["jit_options"] = self.jit_options
+            params["jit_kwargs"] = self._user_jit_kwargs
+        else:
+            if not self.with_batch_dim:
+                params["with_batch_dim"] = self.with_batch_dim
+            if self.jit_options != "ops":
+                params["jit_options"] = self.jit_options
+            if self._user_jit_kwargs:
+                params["jit_kwargs"] = self._user_jit_kwargs
+
+        if params:
+            config["params"] = params
+
         return config
 
 
@@ -1263,51 +1287,44 @@ def pipeline_from_yaml(yaml_path: str, **kwargs) -> Pipeline:
     """
     with open(yaml_path, "r", encoding="utf-8") as f:
         pipeline_config = yaml.safe_load(f)
-    operations = pipeline_config["operations"]
-    return pipeline_from_config(Config({"operations": operations}), **kwargs)
+    return pipeline_from_config(Config(pipeline_config), **kwargs)
 
 
-def pipeline_to_config(pipeline: Pipeline) -> Config:
+def _pipeline_to_serializable_dict(pipeline: Pipeline, verbose=False) -> dict:
+    """Convert a Pipeline to a flat operations dict suitable for serialization.
+
+    The output format is ``{"operations": [<list of operation dicts>]}``
+    which can be loaded back via ``pipeline_from_config``.
+    """
+    return {"operations": Pipeline._pipeline_to_list(pipeline, verbose=verbose)}
+
+
+def pipeline_to_config(pipeline: Pipeline, verbose=False) -> Config:
     """
     Convert a Pipeline instance into a Config object.
     """
-    # TODO: we currently add the full pipeline as 1 operation to the config.
-    # In another PR we should add a "pipeline" entry to the config instead of the "operations"
-    # entry. This allows us to also have non-default pipeline classes as top level op.
-    pipeline_dict = {"operations": [pipeline.get_dict()]}
-
-    # HACK: If the top level operation is a single pipeline, collapse it into the operations list.
-    ops = pipeline_dict["operations"]
-    if ops[0]["name"] == "pipeline" and len(ops) == 1:
-        pipeline_dict = {"operations": ops[0]["operations"]}
-
-    return Config(pipeline_dict)
+    return Config(_pipeline_to_serializable_dict(pipeline, verbose=verbose))
 
 
-def pipeline_to_json(pipeline: Pipeline) -> str:
+def pipeline_to_json(pipeline: Pipeline, verbose=False) -> str:
     """
     Convert a Pipeline instance into a JSON string.
     """
-    pipeline_dict = {"operations": [pipeline.get_dict()]}
-
-    # HACK: If the top level operation is a single pipeline, collapse it into the operations list.
-    ops = pipeline_dict["operations"]
-    if ops[0]["name"] == "pipeline" and len(ops) == 1:
-        pipeline_dict = {"operations": ops[0]["operations"]}
-
-    return json.dumps(pipeline_dict, cls=ZEAEncoderJSON, indent=4)
+    return json.dumps(
+        _pipeline_to_serializable_dict(pipeline, verbose=verbose),
+        cls=ZEAEncoderJSON,
+        indent=4,
+    )
 
 
-def pipeline_to_yaml(pipeline: Pipeline, file_path: str) -> None:
+def pipeline_to_yaml(pipeline: Pipeline, file_path: str, verbose=False) -> None:
     """
     Convert a Pipeline instance into a YAML file.
     """
-    pipeline_dict = pipeline.get_dict()
-
-    # HACK: If the top level operation is a single pipeline, collapse it into the operations list.
-    ops = pipeline_dict["operations"]
-    if ops[0]["name"] == "pipeline" and len(ops) == 1:
-        pipeline_dict = {"operations": ops[0]["operations"]}
-
     with open(file_path, "w", encoding="utf-8") as f:
-        yaml.dump(pipeline_dict, f, Dumper=yaml.Dumper, indent=4)
+        yaml.dump(
+            _pipeline_to_serializable_dict(pipeline, verbose=verbose),
+            f,
+            Dumper=yaml.Dumper,
+            indent=4,
+        )
