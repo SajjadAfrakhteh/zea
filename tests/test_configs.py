@@ -123,7 +123,7 @@ def test_yaml_saving_loading(tmp_path, request, dictionary):
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Save the config to a yaml file
-    config.save_to_yaml(path)
+    config.to_yaml(path)
 
     # Load the config from the yaml file
     config2 = Config.from_yaml(path)

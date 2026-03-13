@@ -255,7 +255,7 @@ Here is a minimal example of how to load and save a config file using zea:
     8000000.0
 
     >>> # Save the config back to file
-    >>> config.save_to_yaml("my_new_config.yaml")
+    >>> config.to_yaml("my_new_config.yaml")
 
 .. testcleanup::
 

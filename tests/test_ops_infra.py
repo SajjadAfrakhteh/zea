@@ -1114,7 +1114,7 @@ def test_pipeline_load_from_yaml(tmp_path):
         }
     )
     path = str(tmp_path / "pipe.yaml")
-    config.save_to_yaml(path)
+    config.to_yaml(path)
 
     pipeline = Pipeline.load(path, jit_options=None)
     assert isinstance(pipeline.operations[0], MultiplyOperation)
