@@ -199,10 +199,12 @@ class GreedyEntropy(LinesActionModel):
         return pixelwise_entropy
 
     def reweight_entropies_around_line(self, entropy_per_line, line_index):
-        """Select the line with maximum entropy and reweight the entropies.
+        """Reweight the entropy around a selected line.
 
-        Selected the max entropy line and reweights the entropy values around it,
-        approximating the decrease in entropy that would occur from observing that line.
+        This approximates the decrease in entropy that would occur from observing that line.
+        It works by multiplying the entropy values around the selected line by an upside-down
+        Gaussian function centered at the selected line, setting the entropy of the selected
+        line to 0, and decreasing the entropies of neighbouring lines.
 
         .. note::
 
@@ -216,11 +218,6 @@ class GreedyEntropy(LinesActionModel):
         Returns:
             Tuple: The selected line index and the updated entropies per line
         """
-
-        ## The rest of this function updates the entropy values around line_index
-        ## by multiplying them with an upside-down Gaussian function centered at
-        ## line_index, setting the entropy of the selected line to 0, and decreasing
-        ## the entropies of neighbouring lines.
 
         # Pad the entropy per line to allow for re-weighting with fixed
         # size RBF, which is necessary for tracing.
