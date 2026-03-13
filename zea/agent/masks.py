@@ -30,7 +30,7 @@ def indices_to_k_hot(
     Args:
         indices (Tensor): Indices of selected actions to set to 1 of shape (..., n_actions).
         n_possible_actions (int): Total number of possible actions.
-        dtype (str, optional): Data type of the mask. Defaults to `bool`.
+        dtype (str, optional): Data type of the mask. Defaults to "bool".
 
     Returns:
         Tensor: k-hot-encoded vector of shape (..., n_possible_actions).
@@ -110,7 +110,7 @@ def initial_equispaced_lines(
     Args:
         n_actions (int): Number of actions to be selected.
         n_possible_actions (int): Number of possible actions.
-        dtype (str, optional): Data type of the mask. Defaults to `bool`.
+        dtype (str, optional): Data type of the mask. Defaults to "bool".
         assert_equal_spacing (bool, optional): If True, asserts that
             `n_possible_actions` is divisible by `n_actions`, this means that every
             line will have the exact same spacing. Otherwise, there might be
@@ -187,7 +187,7 @@ def make_line_mask(
         line_indices (List[int]): A list of indices where the lines should be drawn.
         image_shape (List[int]): The shape of the image as [height, width, channels].
         line_width (int, optional): The width of each line. Defaults to 1.
-        dtype (str, optional): The data type of the mask. Defaults to `bool`.
+        dtype (str, optional): The data type of the mask. Defaults to "bool".
 
     Returns:
         mask (Tensor): A tensor of the same shape as `image_shape` with lines drawn
