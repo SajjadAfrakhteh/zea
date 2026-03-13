@@ -171,7 +171,7 @@ class GreedyEntropy(LinesActionModel):
     @staticmethod
     def compute_pixelwise_entropy(particles, entropy_sigma=1.0):
         """
-        This function computes the entropy for each line using a Gaussian Mixture Model
+        This function computes the entropy for each pixel using a Gaussian Mixture Model
         approximation of the posterior distribution.
         For more details see Section VI. B here: https://arxiv.org/pdf/2410.13310
 
@@ -216,7 +216,7 @@ class GreedyEntropy(LinesActionModel):
             line_index (int): Index of the line with maximum entropy
 
         Returns:
-            Tuple: The selected line index and the updated entropies per line
+            Tuple: The reweighted entropy per line, of shape (n_possible_actions,)
         """
 
         # Pad the entropy per line to allow for re-weighting with fixed
