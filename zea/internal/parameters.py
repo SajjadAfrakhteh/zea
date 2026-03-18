@@ -372,7 +372,7 @@ class Parameters(ZeaObject):
                 if old_exists and old_val is None and new_val is None:
                     continue
                 if old_exists and old_val is not None and new_val is not None:
-                    if isinstance(old_val, np.ndarray) or isinstance(new_val, np.ndarray):
+                    if isinstance(old_val, np.ndarray) and isinstance(new_val, np.ndarray):
                         try:
                             if np.array_equal(old_val, new_val):
                                 continue
