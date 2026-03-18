@@ -133,6 +133,21 @@ class DummyParameters(Parameters):
         return base[1] + self.param6
 
 
+class DummyArrayParameters(Parameters):
+    """Minimal class for testing ndarray handling in Parameters.update()."""
+
+    VALID_PARAMS = {
+        "arr": {"type": np.ndarray},
+    }
+
+    @cache_with_dependencies("arr")
+    def arr_sum(self):
+        if not hasattr(self, "_arr_sum_count"):
+            self._arr_sum_count = 0
+        self._arr_sum_count += 1
+        return np.sum(self.arr)
+
+
 @pytest.fixture
 def dummy_params():
     """Fixture for a fresh DummyParameters instance with required params."""
@@ -352,3 +367,57 @@ def test_optional_parm_with_dependent_behavior():
     p2.optional_param = None
     assert np.allclose(p2.optional_param, expected)
     assert np.isclose(p2.dependent_on_optional, expected[1] + 8)
+
+
+def test_update_skips_unchanged_values_keeps_cache(dummy_params):
+    """Test update skips equal values and keeps cached computed properties."""
+    _ = dummy_params.computed1
+    assert "computed1" in dummy_params._cache
+    cached_before = dummy_params._cache["computed1"]
+
+    dummy_params.update(param1=dummy_params.param1)
+    cached_after = dummy_params._cache["computed1"]
+    assert cached_after is cached_before
+    assert dummy_params._computed1_count == 1
+
+
+def test_update_force_invalidates_cache_even_when_value_unchanged(dummy_params):
+    """Test force=True invalidates dependents even when incoming value is unchanged."""
+    _ = dummy_params.computed1
+    assert "computed1" in dummy_params._cache
+
+    dummy_params.update(force=True, param1=dummy_params.param1)
+    assert "computed1" not in dummy_params._cache
+
+    _ = dummy_params.computed1
+    assert dummy_params._computed1_count == 2
+
+
+def test_update_with_changed_value_invalidates_cache(dummy_params):
+    """Test update invalidates cached dependents when a value changes."""
+    _ = dummy_params.computed3
+    assert "computed3" in dummy_params._cache
+
+    dummy_params.update(param4=dummy_params.param4 * 1.01)
+    assert "computed3" not in dummy_params._cache
+
+
+def test_update_ignores_unknown_keys(dummy_params):
+    """Test update ignores unknown keys without creating attributes."""
+    dummy_params.update(non_existing_key=123)
+    assert not hasattr(dummy_params, "non_existing_key")
+
+
+def test_update_ndarray_equality_skips_recompute():
+    """Test update uses array equality and skips updates for equal ndarrays."""
+    params = DummyArrayParameters(arr=np.array([1.0, 2.0, 3.0]))
+    _ = params.arr_sum
+    assert "arr_sum" in params._cache
+    cached_before = params._cache["arr_sum"]
+
+    params.update(arr=np.array([1.0, 2.0, 3.0]))
+    assert params._cache["arr_sum"] is cached_before
+    assert params._arr_sum_count == 1
+
+    params.update(arr=np.array([1.0, 2.0, 4.0]))
+    assert "arr_sum" not in params._cache

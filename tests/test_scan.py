@@ -1,6 +1,7 @@
 """Tests for the Scan class."""
 
 import time
+
 import numpy as np
 import pytest
 
@@ -31,6 +32,13 @@ scan_args = {
     "waveforms_one_way": np.zeros((2, 64)),
     "waveforms_two_way": np.zeros((2, 64)),
     "tgc_gain_curve": np.ones((3328,)),
+    "probe_geometry": np.column_stack(
+        (
+            np.linspace(-0.019, 0.019, 10),
+            np.zeros(10),
+            np.zeros(10),
+        )
+    ),
 }
 
 
@@ -335,50 +343,31 @@ def test_update_behaviour_and_cache_invalidation():
     """Test Parameters.update: skipping unchanged values and force invalidation."""
     scan = Scan(**scan_args)
 
-    # Access pfield to populate cache
-    _ = scan.pfield
-    assert "pfield" in scan._cache
-    cached_before = scan._cache.get("pfield")
+    # Access grid to populate cache
+    _ = scan.grid
+    assert "grid" in scan._cache
+    cached_before = scan._cache.get("grid")
 
     # Update with the same value (should be a no-op and keep cache)
     scan.update(center_frequency=scan.center_frequency)
-    cached_after = scan._cache.get("pfield")
+    cached_after = scan._cache.get("grid")
     assert cached_before is cached_after
 
-    # Force update with same value should invalidate cache (pfield removed until next access)
+    # Force update with same value should invalidate cache (grid removed until next access)
     scan.update(force=True, center_frequency=scan.center_frequency)
-    assert "pfield" not in scan._cache
+    assert "grid" not in scan._cache
 
     # Update with a different value should also invalidate cache
+    _ = scan.grid  # repopulate cache
     scan.update(center_frequency=scan.center_frequency * 1.01)
-    assert "pfield" not in scan._cache
+    assert "grid" not in scan._cache
 
 
-def test_update_ignores_unknown_keys_and_timings():
-    """Ensure update silently ignores unknown keys and print timings."""
+def test_update_ignores_unknown_keys():
+    """Ensure update ignores unknown keys."""
 
     scan = Scan(**scan_args)
 
     # Unknown key should be ignored without raising
     scan.update(nonexistent_param=123)
     assert not hasattr(scan, "nonexistent_param")
-
-    # Measure timing for repeated updates: compare with checks vs forced
-    n = 1000
-
-    # Ensure n_tx is set to a known value
-    scan.n_tx = scan_args["n_tx"]
-
-    t0 = time.perf_counter()
-    for i in range(n):
-        # update with same value repeatedly; should be skipped by checks
-        scan.update(n_tx=scan.n_tx)
-    t1 = time.perf_counter()
-    print(f"{n} updates with checks took {t1 - t0:.6f} seconds")
-
-    t0 = time.perf_counter()
-    for i in range(n):
-        # force update each time, bypassing the equality checks
-        scan.update(force=True, n_tx=scan.n_tx)
-    t1 = time.perf_counter()
-    print(f"{n} forced updates took {t1 - t0:.6f} seconds")
