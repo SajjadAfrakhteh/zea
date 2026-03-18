@@ -17,7 +17,11 @@ import keras
 import numpy as np
 import pytest
 
-from zea.internal.parameters import MissingDependencyError, Parameters, cache_with_dependencies
+from zea.internal.parameters import (
+    MissingDependencyError,
+    Parameters,
+    cache_with_dependencies,
+)
 
 
 class DummyCircularParameters(Parameters):
@@ -421,3 +425,30 @@ def test_update_ndarray_equality_skips_recompute():
 
     params.update(arr=np.array([1.0, 2.0, 4.0]))
     assert "arr_sum" not in params._cache
+
+
+def test_update_skips_none_to_none_for_existing_param(dummy_params):
+    """Test update skips when an existing parameter remains None."""
+    dummy_params.param5 = None
+    assert "param5" in dummy_params._params
+
+    # This should hit the old_exists + None/None early-continue path.
+    dummy_params.update(param5=None)
+    assert dummy_params.param5 is None
+
+
+def test_update_array_equal_type_error_falls_through_to_setattr():
+    """Test update catches np.array_equal errors and still applies setattr."""
+
+    class _RaisesOnEq:
+        def __eq__(self, other):
+            raise TypeError("bad equality")
+
+    old_arr = np.array([_RaisesOnEq()], dtype=object)
+    new_arr = np.array([_RaisesOnEq()], dtype=object)
+    params = DummyArrayParameters(arr=old_arr)
+
+    # np.array_equal(old_arr, new_arr) raises TypeError, code should fall through
+    # and still set the new value.
+    params.update(arr=new_arr)
+    assert params.arr is new_arr
