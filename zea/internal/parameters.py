@@ -367,10 +367,11 @@ class Parameters(ZeaObject):
                 continue
 
             if not force:
-                old_val = self._params.get(key)
-                if old_val is None and new_val is None:
+                old_exists = key in self._params
+                old_val = self._params[key] if old_exists else None
+                if old_exists and old_val is None and new_val is None:
                     continue
-                if old_val is not None and new_val is not None:
+                if old_exists and old_val is not None and new_val is not None:
                     if isinstance(old_val, np.ndarray) or isinstance(new_val, np.ndarray):
                         try:
                             if np.array_equal(old_val, new_val):
