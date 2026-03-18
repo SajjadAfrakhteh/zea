@@ -351,6 +351,37 @@ class Parameters(ZeaObject):
         # Invalidate cache for this parameter if it is also a computed property
         self._invalidate(key)
 
+    def update(self, force=False, **kwargs):
+        """Update parameters, skipping values that haven't changed unless forced.
+
+        Only valid parameters (those listed in ``VALID_PARAMS``) are considered;
+        unknown keys are silently ignored.
+
+        Args:
+            force: If True, set every parameter unconditionally (triggers cache
+                invalidation even when the value is unchanged).  Default is False,
+                which skips unchanged values.
+        """
+        for key, new_val in kwargs.items():
+            if key not in self.VALID_PARAMS:
+                continue
+
+            if not force:
+                old_val = self._params.get(key)
+                if old_val is None and new_val is None:
+                    continue
+                if old_val is not None and new_val is not None:
+                    if isinstance(old_val, np.ndarray) or isinstance(new_val, np.ndarray):
+                        try:
+                            if np.array_equal(old_val, new_val):
+                                continue
+                        except (TypeError, ValueError):
+                            pass  # fall through to setattr
+                    elif old_val == new_val:
+                        continue
+
+            setattr(self, key, new_val)
+
     def __delattr__(self, name):
         # Allow deletion of parameters, but not properties
         if name in self._params:
