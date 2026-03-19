@@ -10,10 +10,8 @@ import numpy as np
 import pytest
 from keras import ops
 
-from zea import log
-from zea.data.dataloader import Dataloader
 from zea.data.augmentations import RandomCircleInclusion
-from zea.data.dataloader import MAX_RETRY_ATTEMPTS, H5Generator
+from zea.data.dataloader import Dataloader, H5DataSource
 from zea.data.datasets import Dataset
 from zea.data.file import File
 from zea.data.layers import Resizer
@@ -80,10 +78,10 @@ def camus_file():
     return CAMUS_FILE
 
 
-def _get_h5_generator(file_path, key, n_frames, insert_frame_axis, seed=None, validate=True):
+def _get_h5_data_source(file_path, key, n_frames, insert_frame_axis, seed=None, validate=True):
     file_paths = [file_path]
-    # Create a H5Generator instance
-    generator = H5Generator(
+
+    generator = H5DataSource(
         file_paths=file_paths,
         key=key,
         n_frames=n_frames,
@@ -108,13 +106,13 @@ def _get_h5_generator(file_path, key, n_frames, insert_frame_axis, seed=None, va
         ("camus_file", "data/image_sc", 15, False),
     ],
 )
-def test_h5_generator(file_path, key, n_frames, insert_frame_axis, request):
-    """Test the H5Generator class"""
+def test_h5_data_source(file_path, key, n_frames, insert_frame_axis, request):
+    """Test the H5DataSource class"""
 
     validate = file_path != "dummy_hdf5"
     file_path = request.getfixturevalue(file_path)
 
-    generator = _get_h5_generator(file_path, key, n_frames, insert_frame_axis, validate=validate)
+    generator = _get_h5_data_source(file_path, key, n_frames, insert_frame_axis, validate=validate)
 
     batch_shape = next(generator()).shape
     if insert_frame_axis:
@@ -130,9 +128,9 @@ def test_h5_generator(file_path, key, n_frames, insert_frame_axis, request):
 
 
 def test_h5_generator_shuffle(dummy_hdf5):
-    """Test the H5Generator class"""
+    """Test the H5DataSource class"""
 
-    generator = _get_h5_generator(
+    generator = _get_h5_data_source(
         dummy_hdf5, "data", 10, False, seed=DEFAULT_TEST_SEED, validate=False
     )
 
@@ -429,61 +427,6 @@ def test_ndim_hdf5_dataset(
     )
 
     next(iter(dataset))
-
-
-@pytest.mark.parametrize(
-    "mock_error_count, expected_retries, should_succeed",
-    [
-        (1, 1, True),  # One error, should succeed on retry
-        (
-            MAX_RETRY_ATTEMPTS - 1,
-            MAX_RETRY_ATTEMPTS - 1,
-            True,
-        ),  # Two errors, should succeed on third try
-        (
-            MAX_RETRY_ATTEMPTS + 1,
-            MAX_RETRY_ATTEMPTS,
-            False,
-        ),  # Too many errors, should fail after max retries
-    ],
-)
-def test_h5_file_retry_count(
-    mock_error_count, expected_retries, should_succeed, dummy_hdf5, monkeypatch
-):
-    """Test that the H5Generator correctly counts retries when files are temporarily unavailable."""
-
-    generator = _get_h5_generator(dummy_hdf5, "data", 1, True, validate=False)
-
-    # Store the original load method
-    original_load_data = File.load_data
-    error_count = [0]  # Use list to allow modification in closure
-
-    # Create a mock load function that fails a specified number of times
-    def mock_load_data(self, dtype, indices):
-        if error_count[0] < mock_error_count:
-            error_count[0] += 1
-            log.debug(f"Simulating I/O error in File.load_data. Error count: {error_count[0]}")
-            raise OSError(f"Simulated file access error (attempt {error_count[0]})")
-        # After specified failures, call the original method
-        return original_load_data(self, dtype, indices)
-
-    # Apply the monkeypatch to the zea.file.File class method
-    monkeypatch.setattr(File, "load_data", mock_load_data)
-
-    if should_succeed:
-        # Should succeed after retries
-        batch = next(iter(generator))
-        batch = ops.convert_to_numpy(batch)
-        assert isinstance(batch, np.ndarray), "Failed to get valid data after retries"
-    else:
-        # Should fail after max retries
-        with pytest.raises(ValueError) as exc_info:
-            next(iter(generator))
-        assert "Failed to complete operation" in str(exc_info.value)
-
-    assert generator.retry_count == expected_retries, (
-        f"Expected {expected_retries} retries but got {generator.retry_count}"
-    )
 
 
 @pytest.mark.usefixtures("dummy_hdf5")

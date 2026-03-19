@@ -118,7 +118,7 @@ def generate_h5_indices(
             file_paths = [file_paths[i] for i in indices_sorting_file_paths]
             file_shapes = [file_shapes[i] for i in indices_sorting_file_paths]
         except Exception:
-            log.warning("H5Generator: Could not sort file_paths by number.")
+            log.warning("Could not sort file_paths by number.")
 
     # block size with stride included
     block_size = n_frames * frame_index_stride
@@ -163,7 +163,7 @@ def generate_h5_indices(
 
     if skipped_files > 0:
         log.warning(
-            f"H5Generator: Skipping {skipped_files} files with not enough frames "
+            f"Skipping {skipped_files} files with not enough frames "
             f"which is about {skipped_files / len(file_paths) * 100:.2f}% of the "
             f"dataset. This can be fine if you expect set `n_frames` and "
             "`frame_index_stride` to be high. Minimum frames in a file needs to be at "
@@ -171,31 +171,6 @@ def generate_h5_indices(
         )
 
     return indices
-
-
-def _h5_reopen_on_io_error(
-    dataloader_obj: H5FileHandleCache,
-    file,
-    key,
-    indices,
-    retry_count,
-    **kwargs,
-):
-    """Reopen the file if an I/O error occurs.
-    Also removes the file from the cache and try to close file.
-    """
-    file_name = indices[0]
-    try:
-        file_handle = dataloader_obj._file_handle_cache.pop(file_name, None)
-        if file_handle is not None:
-            file_handle.close()
-    except Exception:
-        pass
-
-    log.warning(
-        f"H5Generator: I/O error occurred while reading file {file_name}. "
-        f"Retry opening file. Retry count: {retry_count}."
-    )
 
 
 class H5DataSource:
@@ -287,7 +262,7 @@ class H5DataSource:
             log.info(f"H5DataSource: Limiting to {limit_n_samples} / {len(self.indices)} samples.")
             self.indices = self.indices[:limit_n_samples]
 
-        # Compute output shape (same logic as H5Generator)
+        # Compute output shape
         image_shapes = np.array(self.file_shapes)
         image_shapes = np.delete(
             image_shapes, (self.initial_frame_axis, *self.additional_axes_iter), axis=1
