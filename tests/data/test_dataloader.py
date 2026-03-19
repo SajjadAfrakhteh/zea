@@ -2,7 +2,6 @@
 
 import hashlib
 import pickle
-from copy import deepcopy
 
 import h5py
 import keras
@@ -78,7 +77,7 @@ def camus_file():
     return CAMUS_FILE
 
 
-def _get_h5_data_source(file_path, key, n_frames, insert_frame_axis, seed=None, validate=True):
+def _get_h5_data_source(file_path, key, n_frames, insert_frame_axis, validate=True):
     file_paths = [file_path]
 
     generator = H5DataSource(
@@ -86,7 +85,6 @@ def _get_h5_data_source(file_path, key, n_frames, insert_frame_axis, seed=None, 
         key=key,
         n_frames=n_frames,
         insert_frame_axis=insert_frame_axis,
-        seed=seed,
         validate=validate,
     )
     return generator
@@ -112,9 +110,11 @@ def test_h5_data_source(file_path, key, n_frames, insert_frame_axis, request):
     validate = file_path != "dummy_hdf5"
     file_path = request.getfixturevalue(file_path)
 
-    generator = _get_h5_data_source(file_path, key, n_frames, insert_frame_axis, validate=validate)
+    data_source = _get_h5_data_source(
+        file_path, key, n_frames, insert_frame_axis, validate=validate
+    )
 
-    batch_shape = next(generator()).shape
+    batch_shape = data_source[0].shape
     if insert_frame_axis:
         assert batch_shape[-1] == n_frames, (
             f"Something went wrong as the last dimension of the batch shape {batch_shape[-1]}"
@@ -125,19 +125,6 @@ def test_h5_data_source(file_path, key, n_frames, insert_frame_axis, request):
             f"Something went wrong as the last dimension of the batch shape {batch_shape[-1]}"
             " is not divisible by the number of frames {n_frames}"
         )
-
-
-def test_h5_generator_shuffle(dummy_hdf5):
-    """Test the H5DataSource class"""
-
-    generator = _get_h5_data_source(
-        dummy_hdf5, "data", 10, False, seed=DEFAULT_TEST_SEED, validate=False
-    )
-
-    # Test shuffle
-    shuffled_items = deepcopy(generator.shuffled_items)
-    generator._shuffle()
-    assert shuffled_items != generator.shuffled_items, "The generator indices were not shuffled"
 
 
 @pytest.mark.parametrize(
