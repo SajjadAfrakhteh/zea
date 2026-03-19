@@ -24,8 +24,9 @@ import re
 import threading
 from itertools import product
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import List
 
+import grain
 import keras
 import numpy as np
 
@@ -34,12 +35,9 @@ from zea.data.datasets import Dataset, H5FileHandleCache, count_samples_per_dire
 from zea.data.file import File
 from zea.data.layers import Resizer
 from zea.data.utils import json_dumps
-from zea.io_lib import retry_on_io_error
 from zea.utils import map_negative_indices
 
 DEFAULT_NORMALIZATION_RANGE = (0, 1)
-MAX_RETRY_ATTEMPTS = 3
-INITIAL_RETRY_DELAY = 0.1
 
 
 def generate_h5_indices(
@@ -198,243 +196,6 @@ def _h5_reopen_on_io_error(
         f"H5Generator: I/O error occurred while reading file {file_name}. "
         f"Retry opening file. Retry count: {retry_count}."
     )
-
-
-class H5Generator(Dataset):
-    """H5Generator class for iterating over hdf5 files in an advanced way.
-    Mostly used internally, you might want to use the Dataloader class instead.
-    Loads one item at a time. Always outputs numpy arrays.
-    """
-
-    def __init__(
-        self,
-        file_paths: List[str],
-        key: str = "data/image",
-        n_frames: int = 1,
-        shuffle: bool = True,
-        return_filename: bool = False,
-        limit_n_samples: int | None = None,
-        limit_n_frames: int | None = None,
-        seed: int | None = None,
-        cache: bool = False,
-        additional_axes_iter: tuple | None = None,
-        sort_files: bool = True,
-        overlapping_blocks: bool = False,
-        initial_frame_axis: int = 0,
-        insert_frame_axis: bool = False,
-        frame_index_stride: int = 1,
-        frame_axis: int = -1,
-        validate: bool = True,
-        **kwargs,
-    ):
-        super().__init__(file_paths, validate=validate, **kwargs)
-
-        self.key = key
-        self.n_frames = int(n_frames)
-        self.frame_index_stride = int(frame_index_stride)
-        self.frame_axis = int(frame_axis)
-        self.insert_frame_axis = insert_frame_axis
-        self.initial_frame_axis = int(initial_frame_axis)
-        self.return_filename = return_filename
-        self.shuffle = shuffle
-        self.sort_files = sort_files
-        self.overlapping_blocks = overlapping_blocks
-        self.limit_n_samples = limit_n_samples
-        self.limit_n_frames = limit_n_frames
-        self.seed = seed
-        self.additional_axes_iter = additional_axes_iter or []
-
-        assert self.frame_index_stride > 0, (
-            f"`frame_index_stride` must be greater than 0, got {self.frame_index_stride}"
-        )
-        assert self.n_frames > 0, f"`n_frames` must be greater than 0, got {self.n_frames}"
-
-        # Extract some general information about the dataset
-        file_shapes = self.load_file_shapes(key)
-        image_shapes = np.array(file_shapes)
-        image_shapes = np.delete(
-            image_shapes, (self.initial_frame_axis, *self.additional_axes_iter), axis=1
-        )
-        n_dims = len(image_shapes[0])
-
-        self.equal_file_shapes = np.all(image_shapes == image_shapes[0])
-        if not self.equal_file_shapes:
-            log.warning(
-                "H5Generator: Not all files have the same shape. "
-                "This can lead to issues when resizing images later...."
-            )
-            self.shape = np.array([None] * n_dims)
-        else:
-            self.shape = np.array(image_shapes[0])
-
-        if insert_frame_axis:
-            _frame_axis = map_negative_indices([frame_axis], len(self.shape) + 1)
-            self.shape = np.insert(self.shape, _frame_axis, 1)
-        if self.shape[frame_axis]:
-            self.shape[frame_axis] = self.shape[frame_axis] * n_frames
-
-        # Set random number generator
-        self.rng = np.random.default_rng(self.seed)
-
-        self.indices = generate_h5_indices(
-            file_paths=self.file_paths,
-            file_shapes=file_shapes,
-            n_frames=self.n_frames,
-            frame_index_stride=self.frame_index_stride,
-            key=self.key,
-            initial_frame_axis=self.initial_frame_axis,
-            additional_axes_iter=self.additional_axes_iter,
-            sort_files=self.sort_files,
-            overlapping_blocks=self.overlapping_blocks,
-            limit_n_frames=self.limit_n_frames,
-        )
-
-        if not self.shuffle:
-            log.warning("H5Generator: Not shuffling data.")
-
-        if limit_n_samples:
-            log.warning(
-                f"H5Generator: Limiting number of samples to {limit_n_samples} "
-                f"out of {len(self.indices)}"
-            )
-            self.indices = self.indices[:limit_n_samples]
-
-        self.shuffled_items = list(range(len(self.indices)))
-
-        # Retry count for I/O errors
-        self.retry_count = 0
-
-        # Create a cache for the data
-        self.cache = cache
-        self._data_cache = {}
-
-    def _get_single_item(self, idx):
-        # Check if the item is already in the cache
-        if self.cache and idx in self._data_cache:
-            return self._data_cache[idx]
-
-        # Get the data
-        file_name, key, indices = self.indices[idx]
-        file = self.get_file(file_name)
-        image = self.load(file, key, indices)
-        file_data = json_dumps(
-            {
-                "fullpath": file.filename,
-                "filename": file.stem,
-                "indices": indices,
-            }
-        )
-
-        if self.cache:
-            # Store the image and file data in the cache
-            self._data_cache[idx] = [image, file_data]
-
-        return image, file_data
-
-    def __getitem__(self, index):
-        image, file_data = self._get_single_item(self.shuffled_items[index])
-
-        if self.return_filename:
-            return image, file_data
-        else:
-            return image
-
-    @retry_on_io_error(
-        max_retries=MAX_RETRY_ATTEMPTS,
-        initial_delay=INITIAL_RETRY_DELAY,
-        retry_action=_h5_reopen_on_io_error,
-    )
-    def load(
-        self,
-        file: File,
-        key: str,
-        indices: Tuple[Union[list, slice, int], ...] | List[int] | int | None = None,
-    ):
-        """Extract data from hdf5 file.
-        Args:
-            file_name (str): name of the file to extract image from.
-            key (str): key of the hdf5 dataset to grab data from.
-            indices (tuple): indices to extract image from (tuple of slices)
-        Returns:
-            np.ndarray: image extracted from hdf5 file and indexed by indices.
-        """
-        try:
-            images = file.load_data(key, indices)
-        except (OSError, IOError):
-            # Let the decorator handle I/O errors
-            raise
-        except Exception as exc:
-            # For non-I/O errors, provide detailed context
-            raise ValueError(
-                f"Could not load image at index {indices} "
-                f"and file {file.name} of shape {file[key].shape}"
-            ) from exc
-
-        # stack frames along frame_axis
-        if self.insert_frame_axis:
-            # move frames axis to self.frame_axis
-            initial_frame_axis = self.initial_frame_axis
-            if self.additional_axes_iter:
-                # offset initial_frame_axis if we have additional axes that are before
-                # the initial_frame_axis
-                additional_axes_before = sum(
-                    axis < self.initial_frame_axis for axis in self.additional_axes_iter
-                )
-                initial_frame_axis = initial_frame_axis - additional_axes_before
-
-            images = np.moveaxis(images, initial_frame_axis, self.frame_axis)
-        else:
-            # append frames to existing axis
-            images = np.concatenate(images, axis=self.frame_axis)
-
-        return images
-
-    def _shuffle(self):
-        self.rng.shuffle(self.shuffled_items)
-        log.info("H5Generator: Shuffled data.")
-
-    def __len__(self):
-        return len(self.indices)
-
-    def iterator(self):
-        """Generator that yields images from the hdf5 files."""
-        if self.shuffle:
-            self._shuffle()
-        for idx in range(len(self)):
-            yield self[idx]
-
-    def __iter__(self):
-        """
-        Generator that yields images from the hdf5 files.
-        """
-        return self.iterator()
-
-    def __repr__(self):
-        return (
-            f"<{self.__class__.__name__} at 0x{id(self):x}: "
-            f"{len(self)} batches, n_frames={self.n_frames}, key='{self.key}', "
-            f"shuffle={self.shuffle}, file_paths={len(self.file_paths)}>"
-        )
-
-    def __str__(self):
-        return (
-            f"H5Generator with {len(self)} batches from {len(self.file_paths)} files "
-            f"(key='{self.key}')"
-        )
-
-    def summary(self):
-        """Return a string with dataset statistics and per-directory breakdown."""
-        total_samples = len(self.indices)
-        file_names = [idx[0] for idx in self.indices]
-        # Try to infer directories from file_names
-        directories = sorted({str(Path(f).parent) for f in file_names})
-        samples_per_dir = count_samples_per_directory(file_names, directories)
-
-        parts = [f"H5Generator with {total_samples} total samples:"]
-        for dir_path, count in samples_per_dir.items():
-            percentage = (count / total_samples) * 100 if total_samples else 0
-            parts.append(f"  {dir_path}: {count} samples ({percentage:.1f}%)")
-        print("\n".join(parts))
 
 
 class H5DataSource:
@@ -623,9 +384,6 @@ class H5DataSource:
 class Dataloader:
     """High-performance HDF5 dataloader built on `Grain <https://github.com/google/grain>`_.
 
-    Replaces the legacy TF ``make_dataloader`` pipeline with true
-    multi-threaded I/O.  The read path is:
-
     .. code-block:: text
 
         grain threads (N) → h5py (thread-local handles) → numpy → user
@@ -742,8 +500,6 @@ class Dataloader:
         prefetch_buffer_size: int = 500,
         **kwargs,
     ):
-        import grain
-
         # ── Validation ────────────────────────────────────────────────
         if normalization_range is not None:
             assert image_range is not None, (
@@ -868,7 +624,6 @@ class Dataloader:
         This is called automatically when you iterate, but you can call
         it explicitly if you want to hold onto the ``IterDataset`` object.
         """
-        import grain
 
         return self._map_dataset.to_iter_dataset(
             grain.ReadOptions(

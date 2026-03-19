@@ -3,8 +3,6 @@
 import json
 from pathlib import Path
 
-from keras import ops
-
 
 class ZeaJSONEncoder(json.JSONEncoder):
     """Wrapper for json.dumps to encode range and slice objects.
@@ -58,26 +56,6 @@ def json_loads(obj):
         object: deserialized object (dictionary).
     """
     return json.loads(obj, object_hook=_zea_datasets_json_decoder)
-
-
-def decode_file_info(file_info):
-    """Decode file info from a json string.
-    A batch of H5Generator can return a list of file_info that are json strings.
-    This function decodes the json strings and returns a list of dictionaries
-    with the information, namely:
-    - full_path: full path to the file
-    - file_name: file name
-    - indices: indices used to extract the image from the file
-    """
-
-    if file_info.ndim == 0:
-        file_info = [file_info]
-
-    decoded_info = []
-    for info in file_info:
-        info = ops.convert_to_numpy(info)[()].decode("utf-8")
-        decoded_info.append(json_loads(info))
-    return decoded_info
 
 
 def _zea_datasets_json_decoder(dct):
