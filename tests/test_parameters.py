@@ -152,6 +152,21 @@ class DummyArrayParameters(Parameters):
         return np.sum(self.arr)
 
 
+class DummyObjectParameters(Parameters):
+    """Minimal class for testing non-ndarray equality handling in update()."""
+
+    VALID_PARAMS = {
+        "obj": {"type": object},
+    }
+
+    @cache_with_dependencies("obj")
+    def marker(self):
+        if not hasattr(self, "_marker_count"):
+            self._marker_count = 0
+        self._marker_count += 1
+        return self._marker_count
+
+
 @pytest.fixture
 def dummy_params():
     """Fixture for a fresh DummyParameters instance with required params."""
@@ -452,3 +467,67 @@ def test_update_array_equal_type_error_falls_through_to_setattr():
     # and still set the new value.
     params.update(arr=new_arr)
     assert params.arr is new_arr
+
+
+def test_update_non_array_bool_equality_skips_update():
+    """Test non-ndarray bool equality path skips assignment."""
+    params = DummyObjectParameters(obj=42)
+    _ = params.marker
+    assert "marker" in params._cache
+    cached_before = params._cache["marker"]
+
+    params.update(obj=42)
+    assert params._cache["marker"] is cached_before
+    assert params._marker_count == 1
+
+
+def test_update_non_array_arraylike_equality_uses_np_all():
+    """Test non-ndarray equality returning array-like uses np.all(eq)."""
+
+    class _EqArrayLike:
+        def __eq__(self, other):
+            return np.array([True, True], dtype=bool)
+
+    old_obj = _EqArrayLike()
+    new_obj = _EqArrayLike()
+    params = DummyObjectParameters(obj=old_obj)
+    _ = params.marker
+    cached_before = params._cache["marker"]
+
+    params.update(obj=new_obj)
+    assert params._cache["marker"] is cached_before
+    assert params._marker_count == 1
+
+
+def test_update_non_array_equality_exception_sets_value():
+    """Test non-ndarray equality exception path falls through to assignment."""
+
+    class _RaisesOnEq:
+        def __eq__(self, other):
+            raise TypeError("bad equality")
+
+    old_obj = _RaisesOnEq()
+    new_obj = _RaisesOnEq()
+    params = DummyObjectParameters(obj=old_obj)
+
+    params.update(obj=new_obj)
+    assert params.obj is new_obj
+
+
+def test_update_non_array_np_all_exception_falls_through():
+    """Test non-ndarray np.all(eq) exception path falls through to assignment."""
+
+    class _EqResultRaisesAll:
+        def __array__(self, dtype=None):
+            raise TypeError("cannot convert to array")
+
+    class _EqBadAll:
+        def __eq__(self, other):
+            return _EqResultRaisesAll()
+
+    old_obj = _EqBadAll()
+    new_obj = _EqBadAll()
+    params = DummyObjectParameters(obj=old_obj)
+
+    params.update(obj=new_obj)
+    assert params.obj is new_obj
