@@ -14,7 +14,6 @@ from zea.data.dataloader import Dataloader, H5DataSource
 from zea.data.datasets import Dataset
 from zea.data.file import File
 from zea.data.layers import Resizer
-from zea.data.utils import json_loads
 from zea.tools.hf import HFPath
 
 from .. import DEFAULT_TEST_SEED
@@ -239,6 +238,7 @@ def test_h5_dataset_return_filename(
     validate = directory != "dummy_hdf5"
     directory = request.getfixturevalue(directory)
 
+    N_AXIS = 3  # n_frames, height, width
     dataset = Dataloader(
         directory,
         key=key,
@@ -259,18 +259,31 @@ def test_h5_dataset_return_filename(
 
     _, file_dict = batch
 
-    assert len(file_dict) == batch_size, (
-        "The file_dict should contain the same number of elements as the batch size"
+    # Check keys
+    keys = ["filename", "fullpath", "indices"]
+    for key in keys:
+        assert key in file_dict, f"The file_dict should contain the key '{key}'"
+
+    # Check batch size and types
+    keys = ["filename", "fullpath"]
+    for key in keys:
+        assert len(file_dict[key]) == batch_size, (
+            f"The file_dict['{key}'] should contain the same number of elements as the batch size"
+        )
+        for path in file_dict[key]:
+            assert isinstance(path, str), f"Each path in file_dict['{key}'] should be a string"
+
+    # indices nests one deeper, because it has one element per axis (n_frames, height, width)
+    indices = file_dict["indices"]
+    assert len(indices) == N_AXIS, (
+        f"The file_dict['indices'] should contain {N_AXIS} elements in this test"
     )
 
-    file_dict = file_dict[0]  # get the first file_dict of the batch
-    file_dict = json_loads(file_dict)
-
-    filename = file_dict["filename"]
-    assert isinstance(filename, str), "The filename should be a string"
-    fullpath = file_dict["fullpath"]
-    assert isinstance(fullpath, str), "The fullpath should be a string"
-    assert "indices" in file_dict, "The file_dict should contain indices"
+    for idx in indices:
+        assert len(idx) == batch_size, (
+            "Each axis in file_dict['indices'] should contain the same number of elements "
+            "as the batch size"
+        )
 
 
 @pytest.mark.parametrize(

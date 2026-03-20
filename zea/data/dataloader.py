@@ -34,7 +34,6 @@ from zea import log
 from zea.data.datasets import Dataset, H5FileHandleCache, count_samples_per_directory
 from zea.data.file import File
 from zea.data.layers import Resizer
-from zea.data.utils import json_dumps
 from zea.utils import map_negative_indices
 
 DEFAULT_NORMALIZATION_RANGE = (0, 1)
@@ -84,12 +83,12 @@ def generate_h5_indices(
                 (
                     "/folder/path_to_file.hdf5",
                     "data/image",
-                    (range(0, 1), slice(None, 256, None), slice(None, 256, None)),
+                    (slice(0, 1, 1), slice(None, 256, None), slice(None, 256, None)),
                 ),
                 (
                     "/folder/path_to_file.hdf5",
                     "data/image",
-                    (range(1, 2), slice(None, 256, None), slice(None, 256, None)),
+                    (slice(1, 2, 1), slice(None, 256, None), slice(None, 256, None)),
                 ),
                 ...,
             ]
@@ -136,7 +135,7 @@ def generate_h5_indices(
             # Optionally limit frames to load from each file
             n_frames_in_file = min(n_frames_in_file, limit_n_frames)
             indices = [
-                list(range(i, i + block_size, frame_index_stride))
+                slice(i, i + block_size, frame_index_stride)
                 for i in range(0, n_frames_in_file - block_size + 1, block_step_size)
             ]
             yield [indices]
@@ -293,18 +292,16 @@ class H5DataSource:
             return self._data_cache[index]
 
         file_name, key, indices = self.indices[index]
-        file_cache = self._get_cache()
-        file = file_cache.get_file(file_name)
+        file_handle_cache = self._get_file_handle_cache()
+        file = file_handle_cache.get_file(file_name)
         image = self._load(file, key, indices)
 
         if self.return_filename:
-            file_data = json_dumps(
-                {
-                    "fullpath": file.filename,
-                    "filename": Path(file_name).stem,
-                    "indices": indices,
-                }
-            )
+            file_data = {
+                "fullpath": file.filename,
+                "filename": Path(file_name).stem,
+                "indices": indices,
+            }
             result = (image, file_data)
         else:
             result = image
@@ -321,7 +318,7 @@ class H5DataSource:
 
     # -- internals -------------------------------------------------------------
 
-    def _get_cache(self) -> H5FileHandleCache:
+    def _get_file_handle_cache(self) -> H5FileHandleCache:
         """Return the file-handle cache for the current thread."""
         if not hasattr(self._local, "cache"):
             self._local.cache = H5FileHandleCache()
@@ -335,14 +332,10 @@ class H5DataSource:
             images = file.load_data(key, indices)
         except (OSError, IOError):
             # Invalidate cache entry and retry once
-            cache = self._get_cache()
             fname = file.filename
-            cache._file_handle_cache.pop(fname, None)
-            try:
-                file.close()
-            except Exception:
-                pass
-            file = cache.get_file(fname)
+            file_handle_cache = self._get_file_handle_cache()
+            file_handle_cache.pop(fname)
+            file = file_handle_cache.get_file(fname)
             images = file.load_data(key, indices)
 
         if self.insert_frame_axis:
