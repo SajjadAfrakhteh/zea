@@ -258,7 +258,7 @@ class H5DataSource:
             limit_n_frames=limit_n_frames,
         )
 
-        if limit_n_samples:
+        if limit_n_samples is not None:
             log.info(f"H5DataSource: Limiting to {limit_n_samples} / {len(self.indices)} samples.")
             self.indices = self.indices[:limit_n_samples]
 
@@ -279,6 +279,8 @@ class H5DataSource:
 
         # Thread-local file handle caches (one per thread)
         self._local = threading.local()
+        self._all_caches: set[H5FileHandleCache] = set()
+        self._all_caches_lock = threading.Lock()
 
     # -- grain.RandomAccessDataSource protocol ---------------------------------
 
@@ -323,6 +325,8 @@ class H5DataSource:
         """Return the file-handle cache for the current thread."""
         if not hasattr(self._local, "cache"):
             self._local.cache = H5FileHandleCache()
+            with self._all_caches_lock:
+                self._all_caches.add(self._local.cache)
         return self._local.cache
 
     def _load(self, file: File, key: str, indices):
@@ -352,10 +356,11 @@ class H5DataSource:
         return images
 
     def close(self):
-        """Close file handles for the current thread."""
-        cache = getattr(self._local, "cache", None)
-        if cache is not None:
-            cache.close()
+        """Close all file handles across all threads."""
+        with self._all_caches_lock:
+            for c in self._all_caches:
+                c.close()
+            self._all_caches.clear()
 
 
 class Dataloader:
@@ -522,39 +527,21 @@ class Dataloader:
             **kwargs,
         )
 
-        # Helper to apply transforms to images only (preserving filenames)
-        def _ds_map(ds, fn):
-            if return_filename:
-                return ds.map(lambda item: (fn(item[0]), item[1]))
-            return ds.map(fn)
+        # ── Store pipeline config for rebuilding per epoch ────────────
+        self._pipeline_cfg = dict(
+            num_shards=num_shards,
+            shard_index=shard_index,
+            clip_image_range=clip_image_range,
+            assert_image_range=assert_image_range,
+            image_range=image_range,
+            normalization_range=normalization_range,
+            dataset_repetitions=dataset_repetitions,
+            drop_remainder=drop_remainder,
+            augmentation=augmentation,
+            resizer=None,
+        )
 
-        # ── Build Grain pipeline ──────────────────────────────────────
-        ds = grain.MapDataset.source(self.source)
-
-        # Shuffle (before sharding, so every shard sees different order)
-        self._shuffle_node = None
-        if shuffle:
-            ds = ds.shuffle(seed=seed)
-            self._shuffle_node = ds
-
-        # Shard
-        if num_shards > 1:
-            ds = ds[shard_index::num_shards]
-
-        # Ensure channel dim (needed for uniform batching)
-        ds = _ds_map(ds, self._ensure_channel_dim)
-
-        # Clip to image range
-        if clip_image_range and image_range is not None:
-            lo, hi = image_range
-            ds = _ds_map(ds, lambda x, _lo=lo, _hi=hi: keras.ops.clip(x, _lo, _hi))
-
-        # Assert image range
-        if assert_image_range and image_range is not None:
-            _ir = image_range
-            ds = _ds_map(ds, lambda x, _r=_ir: Dataloader._assert_image_range(x, _r))
-
-        # Resize
+        # Pre-build the resizer (stateless, reusable across epochs)
         if image_size or resize_type:
             resize_type = resize_type or "resize"
             if frame_axis != -1:
@@ -562,33 +549,60 @@ class Dataloader:
                     "Resizing only works with frame_axis = -1. Alternatively, "
                     "you can specify resize_axes."
                 )
-            resizer = Resizer(
+            self._pipeline_cfg["resizer"] = Resizer(
                 image_size=image_size,
                 resize_type=resize_type,
                 resize_axes=resize_axes,
                 seed=seed,
                 **resize_kwargs,
             )
-            ds = _ds_map(ds, resizer)
 
-        # Repeat
-        if dataset_repetitions is not None:
-            ds = ds.repeat(num_epochs=dataset_repetitions)
+        self._map_dataset = self._build_pipeline(seed)
 
-        # Batch
-        if batch_size is not None:
-            ds = ds.batch(batch_size=batch_size, drop_remainder=drop_remainder)
+    def _build_pipeline(self, seed: int):
+        """Build the Grain MapDataset pipeline with the given shuffle seed."""
+        cfg = self._pipeline_cfg
 
-        # Normalize
-        if normalization_range is not None:
-            _ir, _nr = image_range, normalization_range
+        def _ds_map(ds, fn):
+            if self.return_filename:
+                return ds.map(lambda item: (fn(item[0]), item[1]))
+            return ds.map(fn)
+
+        ds = grain.MapDataset.source(self.source)
+
+        if self.shuffle:
+            ds = ds.shuffle(seed=seed)
+
+        if cfg["num_shards"] > 1:
+            ds = ds[cfg["shard_index"] :: cfg["num_shards"]]
+
+        ds = _ds_map(ds, self._ensure_channel_dim)
+
+        if cfg["clip_image_range"] and cfg["image_range"] is not None:
+            lo, hi = cfg["image_range"]
+            ds = _ds_map(ds, lambda x, _lo=lo, _hi=hi: keras.ops.clip(x, _lo, _hi))
+
+        if cfg["assert_image_range"] and cfg["image_range"] is not None:
+            _ir = cfg["image_range"]
+            ds = _ds_map(ds, lambda x, _r=_ir: Dataloader._assert_image_range(x, _r))
+
+        if cfg["resizer"] is not None:
+            ds = _ds_map(ds, cfg["resizer"])
+
+        if cfg["dataset_repetitions"] is not None:
+            ds = ds.repeat(num_epochs=cfg["dataset_repetitions"])
+
+        if self.batch_size is not None:
+            ds = ds.batch(batch_size=self.batch_size, drop_remainder=cfg["drop_remainder"])
+
+        if cfg["normalization_range"] is not None:
+            _ir, _nr = cfg["image_range"], cfg["normalization_range"]
             ds = _ds_map(ds, lambda x, _a=_ir, _b=_nr: Dataloader._normalize(x, _a, _b))
 
-        # Augmentation
-        if augmentation is not None:
-            ds = _ds_map(ds, augmentation)
+        if cfg["augmentation"] is not None:
+            ds = _ds_map(ds, cfg["augmentation"])
 
-        self._map_dataset = ds
+        return ds
 
     @property
     def dataset(self):
@@ -610,9 +624,9 @@ class Dataloader:
         )
 
     def __iter__(self):
-        # Re-seed the shuffle node so each epoch sees a different order
-        if self._shuffle_node is not None:
-            self._shuffle_node._seed = int(self._rng.integers(0, 2**31))
+        # Rebuild the pipeline with a fresh seed so each epoch sees a different order
+        if self.shuffle:
+            self._map_dataset = self._build_pipeline(seed=int(self._rng.integers(0, 2**31)))
         return iter(self.to_iter_dataset())
 
     def __len__(self):
