@@ -299,7 +299,7 @@ class H5DataSource:
 
         if self.return_filename:
             file_data = {
-                "fullpath": file.path,
+                "fullpath": file.filename,  # same as file.path, but str type
                 "filename": file.stem,
                 "indices": indices,
             }
