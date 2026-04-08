@@ -12,11 +12,21 @@ updates:
       python-packages:
         patterns:
           - "*"
+    assignees:
+       - "tristan-deep"
+    labels:
+       - "dev"
+    open-pull-requests-limit: 3
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "monthly"
+      interval: "weekly"
     groups:
       github-actions:
         patterns:
           - "*"
+    assignees:
+       - "tristan-deep"
+    labels:
+       - "dev"
+    open-pull-requests-limit: 3
