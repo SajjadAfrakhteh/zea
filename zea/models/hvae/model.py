@@ -1,8 +1,9 @@
 import random as pythonrandom
-from keras import Model, Sequential, Variable, layers, ops, random
-import numpy as np
 
-from zea.models.hvae.utils import SoftPlus, GaussianAnalyticalKL
+import numpy as np
+from keras import Model, Sequential, Variable, layers, ops, random
+
+from zea.models.hvae.utils import GaussianAnalyticalKL, SoftPlus
 
 
 class VAE(Model):
