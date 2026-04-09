@@ -84,6 +84,7 @@ NOTEBOOK_PARAMETERS = {
         "inference_fractions": [0.03],
         "n_samples": 2,
         "batch_size": 1,
+        "load_weights": False,
     },
     "dbua_example.ipynb": {
         "num_iterations": 2,

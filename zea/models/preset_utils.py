@@ -277,15 +277,18 @@ class KerasPresetLoader(PresetLoader):
         """Load a model from a serialized Keras config."""
         model = load_serialized_object(self.config, cls=cls, **kwargs)
 
+        # Models with a custom_load_weights method handle both architecture setup and weight
+        # loading internally. Always call it and pass load_weights so they can optionally skip
+        # downloading / applying the weights (e.g. for faster test execution).
+        if hasattr(model, "custom_load_weights"):
+            jax_memory_cleanup(model)
+            model.custom_load_weights(self.preset, load_weights=load_weights)
+            return model
+
         if not load_weights:
             return model
 
         jax_memory_cleanup(model)
-
-        # if model has a custom load_weights method, call it
-        if hasattr(model, "custom_load_weights"):
-            model.custom_load_weights(self.preset)
-            return model
 
         # try to build with image_shape or input_shape if not built yet ->
         # but preferred way to build is to have a build_config in the json!
