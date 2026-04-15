@@ -1207,9 +1207,7 @@ class GeneralizedCoherenceFactor(Operation):
 
         return {self.output_key: output}
 
-    # ----------------------------------
-    # CORE LOGIC (MATLAB-style)
-    # ----------------------------------
+   
     def _gcf_single(self, data):
         """
         Expected shape:
