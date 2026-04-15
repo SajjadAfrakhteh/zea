@@ -1015,7 +1015,7 @@ class Beamform(Pipeline):
             )
             self.beamformer_type = name_mapping[beamformer]
 
-        if self.beamformer_type not in ["delay_and_sum", "delay_multiply_and_sum"]:
+        if self.beamformer_type not in ["delay_and_sum", "delay_multiply_and_sum","gcf"]:
             raise ValueError(
                 f"Unsupported beamformer type: {self.beamformer_type}. "
                 "Supported types are 'delay_and_sum' and 'delay_multiply_and_sum'."
@@ -1206,6 +1206,144 @@ class DelayMultiplyAndSum(Operation):
             beamformed_data = ops.map(self.process_image, data)
 
         return {self.output_key: beamformed_data}
+
+
+
+@ops_registry("gcf")
+class GeneralizedCoherenceFactor(Operation):
+    """
+    Generalized Coherence Factor (GCF) beamformer.
+
+    Acts as a coherence-weighted DAS applied after TOF correction.
+
+    Supports:
+        - receive: coherence across elements
+        - transmit: coherence across waves
+        - both: joint coherence (2D FFT)
+
+    Input:
+        (n_tx, n_pix, n_el, n_ch)
+
+    Output:
+        (n_pix, n_ch)
+    """
+
+    def __init__(self, M0=4, dimension="both", eps=1e-8, **kwargs):
+        super().__init__(
+            input_data_type=DataTypes.ALIGNED_DATA,
+            output_data_type=DataTypes.BEAMFORMED_DATA,
+            **kwargs,
+        )
+
+        self.M0 = M0
+        self.dimension = dimension
+        self.eps = eps
+
+    def call(self, **kwargs):
+        data = kwargs[self.key]  # (n_tx, n_pix, n_el, n_ch)
+
+        if not self.with_batch_dim:
+            out = self._process(data)
+        else:
+            out = ops.map(self._process, data)
+
+        return {self.output_key: out}
+
+    def _process(self, data):
+        # -------------------------------------------------
+        # Convert IQ → complex if needed
+        # -------------------------------------------------
+        if data.shape[-1] == 2:
+            data_c = data[..., 0] + 1j * data[..., 1]
+        else:
+            data_c = ops.cast(data, "complex64")
+
+        # -------------------------------------------------
+        # Select mode
+        # -------------------------------------------------
+        n_tx = data_c.shape[0]
+        n_el = data_c.shape[2]
+
+        if self.dimension == "both":
+            if n_tx < 2 and n_el >= 2:
+                mode = "receive"
+            elif n_el < 2 and n_tx >= 2:
+                mode = "transmit"
+            elif n_tx < 2 and n_el < 2:
+                raise ValueError("[GCF] Not enough channels or transmits")
+            else:
+                mode = "both"
+        else:
+            mode = self.dimension
+
+        # -------------------------------------------------
+        # Compute GCF
+        # -------------------------------------------------
+        if mode == "both":
+            # FFT over (tx, element)
+            fft_data = ops.fft2(data_c, axes=(0, 2))
+            power = ops.abs(fft_data) ** 2
+
+            M0 = min(self.M0, n_el // 2)
+
+            low = ops.concatenate(
+                [power[:M0, :, :M0], power[-M0:, :, -M0:]],
+                axis=0,
+            )
+
+            LF = ops.sum(low, axis=(0, 2))
+            total = ops.sum(power, axis=(0, 2))
+
+            coherent = ops.sum(data_c, axis=(0, 2))  # DAS-like
+
+        elif mode == "transmit":
+            fft_data = ops.fft(data_c, axis=0)
+            power = ops.abs(fft_data) ** 2
+
+            M0 = min(self.M0, n_tx // 2)
+
+            low = ops.concatenate(
+                [power[:M0, :, :], power[-M0:, :, :]],
+                axis=0,
+            )
+
+            LF = ops.sum(low, axis=(0, 2))
+            total = ops.sum(power, axis=(0, 2))
+
+            coherent = ops.sum(data_c, axis=0)  # sum over tx
+
+        elif mode == "receive":
+            fft_data = ops.fft(data_c, axis=2)
+            power = ops.abs(fft_data) ** 2
+
+            M0 = min(self.M0, n_el // 2)
+
+            low = ops.concatenate(
+                [power[:, :, :M0], power[:, :, -M0:]],
+                axis=2,
+            )
+
+            LF = ops.sum(low, axis=(0, 2))
+            total = ops.sum(power, axis=(0, 2))
+
+            coherent = ops.sum(data_c, axis=2)  # sum over elements
+
+        else:
+            raise ValueError(f"[GCF] Unknown mode: {mode}")
+
+        # -------------------------------------------------
+        # GCF weight
+        # -------------------------------------------------
+        gcf = LF / (total + self.eps)
+        gcf = ops.where(ops.isnan(gcf), 0.0, gcf)
+
+        # -------------------------------------------------
+        # Apply weighting
+        # -------------------------------------------------
+        out = gcf * coherent
+
+        return out
+
 
 
 def make_operation_chain(
