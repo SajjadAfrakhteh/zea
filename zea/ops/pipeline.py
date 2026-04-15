@@ -1208,8 +1208,13 @@ class DelayMultiplyAndSum(Operation):
         return {self.output_key: beamformed_data}
 
 
+
 @ops_registry("gcf")
 class GeneralizedCoherenceFactor(Operation):
+    """
+    Generalized Coherence Factor (GCF) beamformer.
+    (UNCHANGED CONCEPT)
+    """
 
     def __init__(self, M0=4, dimension="both", eps=1e-8, **kwargs):
         super().__init__(
@@ -1217,7 +1222,6 @@ class GeneralizedCoherenceFactor(Operation):
             output_data_type=DataTypes.BEAMFORMED_DATA,
             **kwargs,
         )
-
         self.M0 = M0
         self.dimension = dimension
         self.eps = eps
@@ -1233,19 +1237,17 @@ class GeneralizedCoherenceFactor(Operation):
         return {self.output_key: out}
 
     # -------------------------------------------------
-    # ONLY ADDITION (FFT COMPATIBILITY)
+    # helper: FFT2 wrapper compatible with keras.ops
     # -------------------------------------------------
-    def _to_complex(self, x):
-        return (
-            ops.cast(x, "float32"),
-            ops.zeros_like(x, dtype="float32"),
-        )
+    def _fft2_last2(self, x):
+        # x is complex tensor -> convert to (real, imag)
+        x_tuple = (ops.real(x), ops.imag(x))
+        y = ops.fft2(x_tuple)
+        return ops.complex(y[0], y[1])
 
     def _process(self, data):
 
-        # -------------------------------------------------
-        # IQ → complex (UNCHANGED LOGIC)
-        # -------------------------------------------------
+        # IQ → complex
         if data.shape[-1] == 2:
             data_c = channels_to_complex(data)
         else:
@@ -1270,16 +1272,20 @@ class GeneralizedCoherenceFactor(Operation):
             mode = self.dimension
 
         # -------------------------------------------------
-        # FIXED FFT (NO AXIS ARGUMENTS ANYWHERE)
+        # FIXED FFT (NO axis args, NO fft/fft2 misuse)
         # -------------------------------------------------
 
-        data_fft_in = self._to_complex(data_c)
-
         if mode == "both":
+            # (n_tx, n_pix, n_el, n_ch)
+            # -> (n_pix, n_ch, n_tx, n_el)
+            x = ops.transpose(data_c, (1, 3, 0, 2))
 
-            fft_data = ops.fft2(data_fft_in)  # <-- FIX
+            fft_data = self._fft2_last2(x)
 
-            power = ops.square(ops.abs(fft_data))
+            # back -> (n_tx, n_pix, n_el, n_ch)
+            fft_data = ops.transpose(fft_data, (2, 0, 3, 1))
+
+            power = ops.abs(fft_data) ** 2
 
             M0 = min(self.M0, n_el // 2)
 
@@ -1290,14 +1296,15 @@ class GeneralizedCoherenceFactor(Operation):
 
             LF = ops.sum(low, axis=(0, 2))
             total = ops.sum(power, axis=(0, 2))
-
             coherent = ops.sum(data_c, axis=(0, 2))
 
         elif mode == "transmit":
+            x = ops.transpose(data_c, (2, 1, 0, 3))  # bring tx last-2 compatible
 
-            fft_data = ops.fft(data_fft_in)  # <-- FIX
+            fft_data = self._fft2_last2(x)
+            fft_data = ops.transpose(fft_data, (2, 1, 0, 3))
 
-            power = ops.square(ops.abs(fft_data))
+            power = ops.abs(fft_data) ** 2
 
             M0 = min(self.M0, n_tx // 2)
 
@@ -1308,14 +1315,13 @@ class GeneralizedCoherenceFactor(Operation):
 
             LF = ops.sum(low, axis=(0, 2))
             total = ops.sum(power, axis=(0, 2))
-
             coherent = ops.sum(data_c, axis=0)
 
         elif mode == "receive":
+            x = ops.transpose(data_c, (0, 1, 2, 3))  # already last2 ok for el?
 
-            fft_data = ops.fft(data_fft_in)  # <-- FIX
-
-            power = ops.square(ops.abs(fft_data))
+            fft_data = self._fft2_last2(x)
+            power = ops.abs(fft_data) ** 2
 
             M0 = min(self.M0, n_el // 2)
 
@@ -1326,21 +1332,20 @@ class GeneralizedCoherenceFactor(Operation):
 
             LF = ops.sum(low, axis=(0, 2))
             total = ops.sum(power, axis=(0, 2))
-
             coherent = ops.sum(data_c, axis=2)
 
         else:
             raise ValueError(f"[GCF] Unknown mode: {mode}")
 
         # -------------------------------------------------
-        # GCF weight (UNCHANGED)
+        # GCF weight (FIX dtype issue ONLY)
         # -------------------------------------------------
         gcf = LF / (total + self.eps)
         gcf = ops.where(ops.isnan(gcf), 0.0, gcf)
 
-        # -------------------------------------------------
-        # Apply weighting (UNCHANGED)
-        # -------------------------------------------------
+        # IMPORTANT FIX: match complex dtype for multiplication
+        gcf = ops.cast(gcf, coherent.dtype)
+
         out = gcf * coherent
 
         return out
