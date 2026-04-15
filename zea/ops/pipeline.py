@@ -1209,6 +1209,8 @@ class DelayMultiplyAndSum(Operation):
 
 
 
+import tensorflow as tf
+
 @ops_registry("gcf")
 class GeneralizedCoherenceFactor(Operation):
 
@@ -1234,119 +1236,117 @@ class GeneralizedCoherenceFactor(Operation):
         return {self.output_key: out}
 
     # -------------------------------------------------
-    # SAFE FFT helper (replaces axis= in ops.fft)
+    # FAST FFT (graph-safe)
     # -------------------------------------------------
-    def _fft_along_axis(self, x, axis):
-        x = ops.swapaxes(x, axis, -1)
-        x = ops.fft(x)
-        x = ops.swapaxes(x, axis, -1)
+    def _fft(self, x, axis):
+        perm = list(range(len(x.shape)))
+        perm[axis], perm[-1] = perm[-1], perm[axis]
+
+        x = tf.transpose(x, perm)
+        x = tf.signal.fft(tf.cast(x, tf.complex64))
+        x = tf.transpose(x, perm)
+
         return x
 
+    # -------------------------------------------------
+    # OPTIMIZED CORE
+    # -------------------------------------------------
     def _process(self, data):
 
-        # -------------------------------------------------
+        # -------------------------
         # IQ → complex
-        # -------------------------------------------------
+        # -------------------------
         if data.shape[-1] == 2:
             data_c = channels_to_complex(data)
         else:
-            data_c = ops.cast(data, "complex64")
+            data_c = tf.cast(data, tf.complex64)
 
-        n_tx = data_c.shape[0]
-        n_el = data_c.shape[2]
+        shape = tf.shape(data_c)
+        n_tx = shape[0]
+        n_el = shape[2]
 
-        # -------------------------------------------------
-        # mode selection (UNCHANGED)
-        # -------------------------------------------------
+        # -------------------------
+        # MODE
+        # -------------------------
         if self.dimension == "both":
-            if n_tx < 2 and n_el >= 2:
-                mode = "receive"
-            elif n_el < 2 and n_tx >= 2:
-                mode = "transmit"
-            elif n_tx < 2 and n_el < 2:
-                raise ValueError("[GCF] Not enough channels or transmits")
-            else:
-                mode = "both"
+            mode = tf.cond(
+                tf.logical_and(n_tx >= 2, n_el >= 2),
+                lambda: "both",
+                lambda: tf.cond(
+                    n_tx >= 2,
+                    lambda: "transmit",
+                    lambda: "receive",
+                ),
+            )
         else:
             mode = self.dimension
 
-        # -------------------------------------------------
-        # FFT FIX (NO axis argument)
-        # -------------------------------------------------
-        if mode == "both":
-            fft_data = self._fft_along_axis(data_c, 0)
-            fft_data = self._fft_along_axis(fft_data, 2)
+        # =================================================
+        # BOTH MODE (optimized)
+        # =================================================
+        if self.dimension == "both" or mode == "both":
 
-            power = ops.abs(fft_data) ** 2
+            fft_data = self._fft(data_c, 0)
+            fft_data = self._fft(fft_data, 2)
 
-            M0 = min(self.M0, n_el // 2)
+            power = tf.abs(fft_data) ** 2
 
-            low = ops.concatenate(
-                [power[:M0, :, :M0], power[-M0:, :, -M0:]],
-                axis=0,
-            )
+            M0 = tf.minimum(self.M0, n_el // 2)
 
-            LF = ops.sum(low, axis=(0, 2))
-            total = ops.sum(power, axis=(0, 2))
+            # FAST LF extraction (no concat)
+            low_tx = power[:M0, :, :] + power[-M0:, :, :]
 
-            coherent = ops.sum(data_c, axis=(0, 2))
+            LF = tf.reduce_sum(low_tx)
+            total = tf.reduce_sum(power)
 
+            coherent = tf.reduce_sum(data_c, axis=(0, 2))
+
+        # =================================================
+        # TRANSMIT MODE
+        # =================================================
         elif mode == "transmit":
-            fft_data = self._fft_along_axis(data_c, 0)
-            power = ops.abs(fft_data) ** 2
 
-            M0 = min(self.M0, n_tx // 2)
+            fft_data = self._fft(data_c, 0)
+            power = tf.abs(fft_data) ** 2
 
-            low = ops.concatenate(
-                [power[:M0, :, :], power[-M0:, :, :]],
-                axis=0,
-            )
+            M0 = tf.minimum(self.M0, n_tx // 2)
 
-            LF = ops.sum(low, axis=(0, 2))
-            total = ops.sum(power, axis=(0, 2))
+            low_tx = power[:M0, :, :] + power[-M0:, :, :]
 
-            coherent = ops.sum(data_c, axis=0)
+            LF = tf.reduce_sum(low_tx)
+            total = tf.reduce_sum(power)
 
-        elif mode == "receive":
-            fft_data = self._fft_along_axis(data_c, 2)
-            power = ops.abs(fft_data) ** 2
+            coherent = tf.reduce_sum(data_c, axis=0)
 
-            M0 = min(self.M0, n_el // 2)
-
-            low = ops.concatenate(
-                [power[:, :, :M0], power[:, :, -M0:]],
-                axis=2,
-            )
-
-            LF = ops.sum(low, axis=(0, 2))
-            total = ops.sum(power, axis=(0, 2))
-
-            coherent = ops.sum(data_c, axis=2)
-
+        # =================================================
+        # RECEIVE MODE
+        # =================================================
         else:
-            raise ValueError(f"[GCF] Unknown mode: {mode}")
 
-        # -------------------------------------------------
-        # GCF weight (FORCED REAL TYPE)
-        # -------------------------------------------------
+            fft_data = self._fft(data_c, 2)
+            power = tf.abs(fft_data) ** 2
+
+            M0 = tf.minimum(self.M0, n_el // 2)
+
+            low_rx = power[:, :, :M0] + power[:, :, -M0:]
+
+            LF = tf.reduce_sum(low_rx)
+            total = tf.reduce_sum(power)
+
+            coherent = tf.reduce_sum(data_c, axis=2)
+
+        # -------------------------
+        # GCF weight
+        # -------------------------
         gcf = LF / (total + self.eps)
-        gcf = ops.where(ops.isnan(gcf), 0.0, gcf)
+        gcf = tf.cast(gcf, tf.float32)
 
-        # ensure float (IMPORTANT FIX)
-        gcf = ops.cast(gcf, "float32")
+        # -------------------------
+        # output
+        # -------------------------
+        coherent = tf.cast(coherent, tf.complex64)
 
-        # -------------------------------------------------
-        # coherent must match dtype (FIX)
-        # -------------------------------------------------
-        coherent = ops.cast(coherent, "complex64")
-
-        # -------------------------------------------------
-        # Apply weighting (UNCHANGED CONCEPT)
-        # -------------------------------------------------
-        out = gcf * coherent
-
-        return out
-
+        return gcf * coherent
 
 
 def make_operation_chain(
