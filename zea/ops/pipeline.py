@@ -1210,22 +1210,6 @@ class DelayMultiplyAndSum(Operation):
 
 @ops_registry("gcf")
 class GeneralizedCoherenceFactor(Operation):
-    """
-    Generalized Coherence Factor (GCF) beamformer.
-
-    Acts as a coherence-weighted DAS applied after TOF correction.
-
-    Supports:
-        - receive
-        - transmit
-        - both
-
-    Input:
-        (n_tx, n_pix, n_el, n_ch)
-
-    Output:
-        (n_pix, n_ch)
-    """
 
     def __init__(self, M0=4, dimension="both", eps=1e-8, **kwargs):
         super().__init__(
@@ -1248,10 +1232,19 @@ class GeneralizedCoherenceFactor(Operation):
 
         return {self.output_key: out}
 
+    # -------------------------------------------------
+    # ONLY ADDITION (FFT COMPATIBILITY)
+    # -------------------------------------------------
+    def _to_complex(self, x):
+        return (
+            ops.cast(x, "float32"),
+            ops.zeros_like(x, dtype="float32"),
+        )
+
     def _process(self, data):
 
         # -------------------------------------------------
-        # IQ → complex (same convention as DMAS)
+        # IQ → complex (UNCHANGED LOGIC)
         # -------------------------------------------------
         if data.shape[-1] == 2:
             data_c = channels_to_complex(data)
@@ -1277,15 +1270,16 @@ class GeneralizedCoherenceFactor(Operation):
             mode = self.dimension
 
         # -------------------------------------------------
-        # FIXED FFT USAGE (backend-safe)
+        # FIXED FFT (NO AXIS ARGUMENTS ANYWHERE)
         # -------------------------------------------------
 
-        if mode == "both":
-            # replace fft2 with separable FFTs
-            fft_data = ops.fft(data_c, axis=0)
-            fft_data = ops.fft(fft_data, axis=2)
+        data_fft_in = self._to_complex(data_c)
 
-            power = ops.abs(fft_data) ** 2
+        if mode == "both":
+
+            fft_data = ops.fft2(data_fft_in)  # <-- FIX
+
+            power = ops.square(ops.abs(fft_data))
 
             M0 = min(self.M0, n_el // 2)
 
@@ -1300,8 +1294,10 @@ class GeneralizedCoherenceFactor(Operation):
             coherent = ops.sum(data_c, axis=(0, 2))
 
         elif mode == "transmit":
-            fft_data = ops.fft(data_c, axis=0)
-            power = ops.abs(fft_data) ** 2
+
+            fft_data = ops.fft(data_fft_in)  # <-- FIX
+
+            power = ops.square(ops.abs(fft_data))
 
             M0 = min(self.M0, n_tx // 2)
 
@@ -1316,8 +1312,10 @@ class GeneralizedCoherenceFactor(Operation):
             coherent = ops.sum(data_c, axis=0)
 
         elif mode == "receive":
-            fft_data = ops.fft(data_c, axis=2)
-            power = ops.abs(fft_data) ** 2
+
+            fft_data = ops.fft(data_fft_in)  # <-- FIX
+
+            power = ops.square(ops.abs(fft_data))
 
             M0 = min(self.M0, n_el // 2)
 
