@@ -1162,3 +1162,177 @@ class CommonMidpointPhaseError(Operation):
                 data,
             )
         return {self.output_key: pemap}
+
+
+
+
+@ops_registry("gcf")
+class GeneralizedCoherenceFactor(Operation):
+    """
+    Generalized Coherence Factor (GCF)
+    
+    Supports:
+        - dimension = "transmit"
+        - dimension = "receive"
+        - dimension = "both"
+    """
+
+    STATIC_PARAMS = ["M0", "dimension", "eps"]
+    ADD_OUTPUT_KEYS = ["gcf_map"]
+
+    def __init__(self, M0=4, dimension="both", eps=1e-8, **kwargs):
+        super().__init__(
+            input_data_type=DataTypes.BEAMFORMED_DATA,
+            output_data_type=DataTypes.BEAMFORMED_DATA,
+            **kwargs,
+        )
+
+        if dimension not in ["transmit", "receive", "both"]:
+            raise ValueError("dimension must be 'transmit', 'receive', or 'both'")
+
+        self.M0 = M0
+        self.dimension = dimension
+        self.eps = eps
+
+    # ----------------------------------
+    # PIPELINE ENTRY
+    # ----------------------------------
+    def call(self, **kwargs):
+        data = kwargs[self.key]
+
+        if self.with_batch_dim:
+            output = ops.map(self._gcf_single, data)
+        else:
+            output = self._gcf_single(data)
+
+        return {self.output_key: output}
+
+    # ----------------------------------
+    # CORE LOGIC (MATLAB-style)
+    # ----------------------------------
+    def _gcf_single(self, data):
+        """
+        Expected shape:
+            (n_pix, n_tx, n_rx) OR compatible
+
+        MATLAB equivalent:
+            (pixels, waves, channels)
+        """
+
+        data = ops.cast(data, "float32")
+
+        # -----------------------------
+        # Handle IQ (2 channels)
+        # -----------------------------
+        if ops.shape(data)[-1] == 2:
+            data = ops.sqrt(data[..., 0] ** 2 + data[..., 1] ** 2)
+
+        # -----------------------------
+        # Normalize shape
+        # -----------------------------
+        ndim = ops.ndim(data)
+
+        if ndim == 2:
+            data = ops.expand_dims(data, axis=1)  # (pix, 1, ch)
+
+        elif ndim != 3:
+            raise ValueError(f"[GCF] Invalid shape: {data.shape}")
+
+        # -----------------------------
+        # Dimensions
+        # -----------------------------
+        pixels = ops.shape(data)[0]
+        waves = ops.shape(data)[1]
+        channels = ops.shape(data)[2]
+
+        data_c = ops.cast(data, "complex64")
+
+        # -----------------------------
+        # The GCF Mode Cases
+        # -----------------------------
+        if self.dimension == "both":
+            if (waves < 2) & (channels >= 2):
+                mode = "receive"
+            elif (channels < 2) & (waves >= 2):
+                mode = "transmit"
+            elif (waves < 2) & (channels < 2):
+                raise ValueError("[GCF] Not enough waves/channels")
+            else:
+                mode = "both"
+        else:
+            mode = self.dimension
+
+        # -----------------------------
+        # CASE 1: BOTH
+        # -----------------------------
+        if mode == "both":
+
+            fft_data = ops.fft.fft2(data_c)
+            power = ops.abs(fft_data) ** 2
+
+            M0 = ops.minimum(self.M0, channels // 2)
+
+            low = ops.concatenate(
+                [power[:, :M0, :M0], power[:, -M0:, -M0:]],
+                axis=1,
+            )
+
+            LF = ops.sum(low, axis=(1, 2))
+            total = ops.sum(power, axis=(1, 2))
+            coherent = ops.sum(data, axis=(1, 2))
+
+        # -----------------------------
+        # CASE 2: TRANSMIT
+        # -----------------------------
+        elif mode == "transmit":
+
+            fft_data = ops.fft.fft(data_c, axis=1)
+            power = ops.abs(fft_data) ** 2
+
+            M0 = ops.minimum(self.M0, waves // 2)
+
+            low = ops.concatenate(
+                [power[:, :M0, :], power[:, -M0:, :]],
+                axis=1,
+            )
+
+            LF = ops.sum(low, axis=(1, 2))
+            total = ops.sum(power, axis=(1, 2))
+            coherent = ops.sum(data, axis=1)
+
+        # -----------------------------
+        # CASE 3: RECEIVE
+        # -----------------------------
+        elif mode == "receive":
+
+            fft_data = ops.fft.fft(data_c, axis=2)
+            power = ops.abs(fft_data) ** 2
+
+            M0 = ops.minimum(self.M0, channels // 2)
+
+            low = ops.concatenate(
+                [power[:, :, :M0], power[:, :, -M0:]],
+                axis=2,
+            )
+
+            LF = ops.sum(low, axis=(1, 2))
+            total = ops.sum(power, axis=(1, 2))
+            coherent = ops.sum(data, axis=2)
+
+        else:
+            raise ValueError(f"[GCF] Unknown mode: {mode}")
+
+        # -----------------------------
+        # GCF weight
+        # -----------------------------
+        gcf = LF / (total + self.eps)
+        gcf = ops.where(ops.isnan(gcf), 0.0, gcf)
+
+        output = gcf * coherent
+
+        return output
+
+
+
+
+
