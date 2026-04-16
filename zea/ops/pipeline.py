@@ -1015,7 +1015,7 @@ class Beamform(Pipeline):
             )
             self.beamformer_type = name_mapping[beamformer]
 
-        if self.beamformer_type not in ["delay_and_sum", "delay_multiply_and_sum","gcf"]:
+        if self.beamformer_type not in ["delay_and_sum", "delay_multiply_and_sum", "CF", "gcf"]:
             raise ValueError(
                 f"Unsupported beamformer type: {self.beamformer_type}. "
                 "Supported types are 'delay_and_sum' and 'delay_multiply_and_sum'."
@@ -1209,144 +1209,108 @@ class DelayMultiplyAndSum(Operation):
 
 
 
-import tensorflow as tf
+@ops_registry("CF")
+class CoherenceFactor(Operation):
+    """Coherence Factor beamforming."""
 
-@ops_registry("gcf")
-class GeneralizedCoherenceFactor(Operation):
-
-    def __init__(self, M0=4, dimension="both", eps=1e-8, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(
             input_data_type=DataTypes.ALIGNED_DATA,
             output_data_type=DataTypes.BEAMFORMED_DATA,
             **kwargs,
         )
 
-        self.M0 = M0
-        self.dimension = dimension
-        self.eps = eps
+    def process_image(self, data):
+        """
+        Args:
+            data: (n_tx, n_pix, n_el, n_ch)
+        Returns:
+            (n_pix, n_ch)
+        """
+
+        # ---- Step 1: DAS (per transmit) ----
+        das = ops.sum(data, axis=-2)  # sum over elements → (n_tx, n_pix, n_ch)
+
+        # ---- Step 2: Compute CF ----
+        # You will replace this with your MATLAB logic
+        numerator = ops.abs(ops.sum(data, axis=-2)) ** 2
+        denominator = ops.sum(ops.abs(data) ** 2, axis=-2) + 1e-12
+
+        CF = numerator / denominator  # (n_tx, n_pix, n_ch)
+
+        # ---- Step 3: Apply weighting ----
+        weighted = CF * das
+
+        # ---- Step 4: Sum over transmits ----
+        beamformed = ops.sum(weighted, axis=0)  # (n_pix, n_ch)
+
+        return beamformed
 
     def call(self, **kwargs):
         data = kwargs[self.key]
 
         if not self.with_batch_dim:
-            out = self._process(data)
+            beamformed_data = self.process_image(data)
         else:
-            out = ops.map(self._process, data)
+            beamformed_data = ops.map(self.process_image, data)
 
-        return {self.output_key: out}
+        return {self.output_key: beamformed_data}
 
-    # -------------------------------------------------
-    # FAST FFT (graph-safe)
-    # -------------------------------------------------
-    def _fft(self, x, axis):
-        perm = list(range(len(x.shape)))
-        perm[axis], perm[-1] = perm[-1], perm[axis]
 
-        x = tf.transpose(x, perm)
-        x = tf.signal.fft(tf.cast(x, tf.complex64))
-        x = tf.transpose(x, perm)
 
-        return x
+@ops_registry("gcf")
+class GeneralizedCoherenceFactor(Operation):
+    """Generalized Coherence Factor beamformer."""
 
-    # -------------------------------------------------
-    # OPTIMIZED CORE
-    # -------------------------------------------------
-    def _process(self, data):
+    def __init__(self, m0=4, **kwargs):
+        super().__init__(
+            input_data_type=DataTypes.ALIGNED_DATA,
+            output_data_type=DataTypes.BEAMFORMED_DATA,
+            **kwargs,
+        )
+        self.default_m0 = m0
 
-        # -------------------------
-        # IQ → complex
-        # -------------------------
-        if data.shape[-1] == 2:
-            data_c = channels_to_complex(data)
+    def process_image(self, data, m0):
+        import tensorflow as tf
+
+        # DAS
+        das = ops.sum(data, axis=-2)
+
+        # FFT along aperture
+        data_t = ops.transpose(data, (0, 1, 3, 2))
+        data_t = tf.cast(data_t, tf.complex64)
+        spectrum = tf.signal.fft(data_t)
+        spectrum = ops.transpose(spectrum, (0, 1, 3, 2))
+
+        power = ops.abs(spectrum) ** 2
+
+        # GCF
+        coherent_energy = ops.sum(power[..., :m0, :], axis=-2)
+        total_energy = ops.sum(power, axis=-2) + 1e-12
+
+        gcf = coherent_energy / total_energy
+
+        weighted = gcf * das
+
+        beamformed = ops.sum(weighted, axis=0)
+
+        return beamformed
+
+    def call(self, **kwargs):
+        data = kwargs[self.key]
+
+        m0 = kwargs.get("gcf_m0", self.default_m0)
+
+        if not self.with_batch_dim:
+            beamformed_data = self.process_image(data, m0)
         else:
-            data_c = tf.cast(data, tf.complex64)
-
-        shape = tf.shape(data_c)
-        n_tx = shape[0]
-        n_el = shape[2]
-
-        # -------------------------
-        # MODE
-        # -------------------------
-        if self.dimension == "both":
-            mode = tf.cond(
-                tf.logical_and(n_tx >= 2, n_el >= 2),
-                lambda: "both",
-                lambda: tf.cond(
-                    n_tx >= 2,
-                    lambda: "transmit",
-                    lambda: "receive",
-                ),
+            beamformed_data = ops.map(
+                lambda x: self.process_image(x, m0), data
             )
-        else:
-            mode = self.dimension
 
-        # =================================================
-        # BOTH MODE (optimized)
-        # =================================================
-        if self.dimension == "both" or mode == "both":
+        return {self.output_key: beamformed_data}
 
-            fft_data = self._fft(data_c, 0)
-            fft_data = self._fft(fft_data, 2)
 
-            power = tf.abs(fft_data) ** 2
-
-            M0 = tf.minimum(self.M0, n_el // 2)
-
-            # FAST LF extraction (no concat)
-            low_tx = power[:M0, :, :] + power[-M0:, :, :]
-
-            LF = tf.reduce_sum(low_tx)
-            total = tf.reduce_sum(power)
-
-            coherent = tf.reduce_sum(data_c, axis=(0, 2))
-
-        # =================================================
-        # TRANSMIT MODE
-        # =================================================
-        elif mode == "transmit":
-
-            fft_data = self._fft(data_c, 0)
-            power = tf.abs(fft_data) ** 2
-
-            M0 = tf.minimum(self.M0, n_tx // 2)
-
-            low_tx = power[:M0, :, :] + power[-M0:, :, :]
-
-            LF = tf.reduce_sum(low_tx)
-            total = tf.reduce_sum(power)
-
-            coherent = tf.reduce_sum(data_c, axis=0)
-
-        # =================================================
-        # RECEIVE MODE
-        # =================================================
-        else:
-
-            fft_data = self._fft(data_c, 2)
-            power = tf.abs(fft_data) ** 2
-
-            M0 = tf.minimum(self.M0, n_el // 2)
-
-            low_rx = power[:, :, :M0] + power[:, :, -M0:]
-
-            LF = tf.reduce_sum(low_rx)
-            total = tf.reduce_sum(power)
-
-            coherent = tf.reduce_sum(data_c, axis=2)
-
-        # -------------------------
-        # GCF weight
-        # -------------------------
-        gcf = LF / (total + self.eps)
-        gcf = tf.cast(gcf, tf.float32)
-
-        # -------------------------
-        # output
-        # -------------------------
-        coherent = tf.cast(coherent, tf.complex64)
-
-        return gcf * coherent
 
 
 def make_operation_chain(
