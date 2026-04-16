@@ -1208,7 +1208,6 @@ class DelayMultiplyAndSum(Operation):
         return {self.output_key: beamformed_data}
 
 
-
 @ops_registry("CF")
 class CoherenceFactor(Operation):
     """Coherence Factor beamforming."""
@@ -1257,7 +1256,6 @@ class CoherenceFactor(Operation):
         return {self.output_key: beamformed_data}
 
 
-
 @ops_registry("gcf")
 class GeneralizedCoherenceFactor(Operation):
     """Generalized Coherence Factor beamformer."""
@@ -1304,13 +1302,9 @@ class GeneralizedCoherenceFactor(Operation):
         if not self.with_batch_dim:
             beamformed_data = self.process_image(data, m0)
         else:
-            beamformed_data = ops.map(
-                lambda x: self.process_image(x, m0), data
-            )
+            beamformed_data = ops.map(lambda x: self.process_image(x, m0), data)
 
         return {self.output_key: beamformed_data}
-
-
 
 
 def make_operation_chain(
