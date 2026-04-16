@@ -94,7 +94,7 @@ Example of a yaml file:
 
 """
 
-from zea.internal.registry import ops_registry
+from zea.internal.registry import beamformer_registry, ops_registry
 from zea.ops import keras_ops
 
 from .base import Identity, Lambda, Mean, Operation, get_ops
@@ -135,6 +135,7 @@ from .ultrasound import (
 __all__ = [
     # Registry
     "ops_registry",
+    "beamformer_registry",
     # Base operations
     "Identity",
     "Lambda",
@@ -144,6 +145,8 @@ __all__ = [
     # Pipeline
     "DelayAndSum",
     "DelayMultiplyAndSum",
+    "CoherenceFactor",
+    "GeneralizedCoherenceFactor",
     "Beamform",
     "Map",
     "PatchedGrid",
