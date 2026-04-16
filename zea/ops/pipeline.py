@@ -9,23 +9,13 @@ from keras import ops
 from zea import log
 from zea.backend import jit
 from zea.config import Config
-from zea.func.tensor import (
-    vmap,
-)
+from zea.func.tensor import vmap
 from zea.func.ultrasound import channels_to_complex, complex_to_channels
-from zea.internal.core import (
-    DataTypes,
-    ZEADecoderJSON,
-    ZEAEncoderJSON,
-    dict_to_tensor,
-)
+from zea.internal.core import DataTypes, ZEADecoderJSON, ZEAEncoderJSON, dict_to_tensor
 from zea.internal.core import Object as ZEAObject
 from zea.internal.registry import ops_registry
 from zea.internal.utils import deprecated
-from zea.ops.base import (
-    Operation,
-    get_ops,
-)
+from zea.ops.base import Operation, get_ops
 from zea.ops.tensor import Normalize
 from zea.ops.ultrasound import (
     ApplyWindow,
@@ -38,9 +28,7 @@ from zea.ops.ultrasound import (
 )
 from zea.probes import Probe
 from zea.scan import Scan
-from zea.utils import (
-    FunctionTimer,
-)
+from zea.utils import FunctionTimer
 
 
 @ops_registry("pipeline")
@@ -204,8 +192,13 @@ class Pipeline:
         """Create a default pipeline.
 
         Args:
-            beamformer (str): Type of beamformer to use. Currently supporting,
-                "delay_and_sum" and "delay_multiply_and_sum". Defaults to "delay_and_sum".
+            beamformer (str): Type of beamformer to use.
+                Currently supporting:
+                - "delay_and_sum"
+                - "delay_multiply_and_sum"
+                - "coherence_factor"
+                - "generalized_coherence_factor" (or "gcf")
+                Defaults to "delay_and_sum".
             num_patches (int): Number of patches for the PatchedGrid operation.
                 Defaults to 100. If you get an out of memory error, try to increase this number.
             baseband (bool): If True, assume the input data is baseband (I/Q) data,
@@ -991,8 +984,13 @@ class Beamform(Pipeline):
         """Initialize a Delay-and-Sum beamforming `zea.Pipeline`.
 
         Args:
-            beamformer (str): Type of beamformer to use. Currently supporting,
-                "delay_and_sum" and "delay_multiply_and_sum".
+            beamformer (str): Type of beamformer to use.
+                Currently supporting:
+                - "delay_and_sum"
+                - "delay_multiply_and_sum"
+                - "coherence_factor"
+                - "generalized_coherence_factor" (or "gcf")
+                Defaults to "delay_and_sum".
             num_patches (int): Number of patches to split the grid into for patch-wise
                 beamforming. If 1, no patching is performed.
             enable_pfield (bool): Whether to include pressure field weighting in the beamforming.
@@ -1015,10 +1013,16 @@ class Beamform(Pipeline):
             )
             self.beamformer_type = name_mapping[beamformer]
 
-        if self.beamformer_type not in ["delay_and_sum", "delay_multiply_and_sum", "CF", "gcf"]:
+        if self.beamformer_type not in [
+            "delay_and_sum",
+            "delay_multiply_and_sum",
+            "coherence_factor",
+            "generalized_coherence_factor",
+        ]:
             raise ValueError(
                 f"Unsupported beamformer type: {self.beamformer_type}. "
-                "Supported types are 'delay_and_sum' and 'delay_multiply_and_sum'."
+                "Supported types are 'delay_and_sum', 'delay_multiply_and_sum', "
+                "'coherence_factor', and 'generalized_coherence_factor'."
             )
 
         # Get beamforming ops
@@ -1208,7 +1212,7 @@ class DelayMultiplyAndSum(Operation):
         return {self.output_key: beamformed_data}
 
 
-@ops_registry("CF")
+@ops_registry("coherence_factor")
 class CoherenceFactor(Operation):
     """Coherence Factor beamforming."""
 
@@ -1256,7 +1260,7 @@ class CoherenceFactor(Operation):
         return {self.output_key: beamformed_data}
 
 
-@ops_registry("gcf")
+@ops_registry("generalized_coherence_factor")
 class GeneralizedCoherenceFactor(Operation):
     """Generalized Coherence Factor beamformer."""
 
