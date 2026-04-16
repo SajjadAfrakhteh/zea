@@ -656,7 +656,7 @@ def test_generalized_coherence_factor_coherent_signal():
 
 @backend_equality_check()
 def test_generalized_coherence_factor_m_zero_passthrough():
-    """m_zero passed via call kwargs overrides the instance default, consistently across backends."""
+    """m_zero passed via call kwargs overrides the instance default."""
 
     import keras
 
